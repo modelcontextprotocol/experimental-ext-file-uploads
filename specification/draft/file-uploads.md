@@ -7,9 +7,7 @@
 - **Discussion**: [File Uploads Working Group Discord thread](https://discord.com/channels/1358869848138059966/1551968557292593172/1552399008440520865)
   and issues in this repository
 
-This is the working draft of the extension, written in SEP form so the working group can submit
-it as an Extensions Track SEP once a reference implementation exists. Anything here can change
-until then, including the extension identifier.
+The working group writes this draft in SEP form so it can submit it as an Extensions Track SEP once a reference implementation exists. Anything here can change before then, including the extension identifier.
 
 ## Abstract
 
@@ -22,8 +20,7 @@ metadata. If it accepts, it returns an `upload_required` result with an HTTPS up
 a server-issued file URI. The client uploads the bytes and retries the call with the file URI in
 place of the placeholder. Small files go inline as RFC 2397 `data:` URIs.
 
-This revision covers uploads only. Downloads, chunked and resumable transfer, and file fields in
-elicitation forms are listed under [Future Work](#future-work).
+This revision covers uploads. [Future Work](#future-work) lists downloads, chunked and resumable transfer, and file fields in elicitation forms.
 
 ## Motivation
 
@@ -49,13 +46,13 @@ The same meeting recorded the host-side constraints:
 - Small files stay in band to keep latency down.
 - Large files go out of band to avoid base64.
 - Uploads work when a gateway holds the OAuth credentials instead of the host.
-- File pointers on the wire are marked so a deterministic proxy can find them.
+- File pointers on the wire carry a marker a deterministic proxy can find.
 
 SEP-2356 defined how a server declares a file argument and an inline `data:` encoding, and sent
 larger files to URL-mode elicitation instead of defining an upload protocol. It closed without
 merging. [SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631) added
 out-of-band transfer through new `files/authorizeUpload` and `files/authorizeDownload` methods.
-Thomas Sarlandie called ordering SEP-2631's biggest flaw: bytes move before the server sees the
+Thomas Sarlandie called ordering SEP-2631's biggest flaw. Bytes move before the server sees the
 rest of the call, so uploads that permissions, quota, or data residency rules would reject still
 consume bandwidth and can land in the wrong region. The group agreed on metadata first, then the
 upload target, then bytes, then finalize, and agreed to build on multi-round-trip requests (MRTR)
@@ -104,7 +101,7 @@ did not declare the extension.
 
 ### File arguments
 
-SEP-2356 closed without merging, so this section restates the parts of it this extension uses.
+This section restates the parts of SEP-2356 this extension uses.
 
 A server marks a file argument by adding `x-mcp-file` to a property of the form
 `{"type": "string", "format": "uri"}` in `Tool.inputSchema`, including array items:
@@ -387,15 +384,13 @@ On stdio there is no canonical URI, so only `omit` targets apply.
 
 SEP-2631 negotiated uploads in a separate `files/authorizeUpload` call before `tools/call`. The
 server had to issue a regional upload URL before it saw the arguments, so it could not check the
-destination or quota first, and the two calls had no protocol-level link. Returning the upload
-target from `tools/call` itself lets the server see the full call first, and `requestState`
+destination or quota first, and the two calls had no protocol-level link. Returning the upload target from `tools/call` lets the server see the full call first, and `requestState`
 carries the binding so any instance can serve the retry.
 
 An earlier version of this draft carried the target as a new `files/upload` entry in an
 `InputRequiredResult`. The MRTR rules and the schema allow only elicitation, sampling, and roots
 requests there, so that design needed a change to the specification. The base protocol lets
-extensions add result types, and the Tasks extension does so. The cost is that a server cannot
-ask for an upload and an elicitation in the same round trip.
+extensions add result types, and the Tasks extension does so. A server then cannot ask for an upload and an elicitation in the same round trip.
 
 ### Why a placeholder and `_meta`
 
@@ -418,7 +413,7 @@ support, and this pair is a starting point.
 - SEP-2356, for the declaration keyword, inline encoding, and host rules.
 - SEP-2631, for file URIs, digests, transfer descriptors, and the `maxSize` change.
 - [SEP-2532](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2532) (resource
-  streaming), which Patrick Rodgers offered as a way to get file bytes directly from a server.
+  streaming), which Patrick Rodgers offered as a way to get file bytes from a server.
 - Storage APIs that separate creating an upload from sending the bytes (pre-signed URLs and
   upload sessions).
 
@@ -434,8 +429,7 @@ hook for extension result types before they can carry `upload_required`.
 ## Security Implications
 
 [Upload targets](#upload-targets) covers requests the server directs the client to make.
-Relaxing those rules allows server-side request forgery through the client and disclosure of
-the user's credential to other resources.
+A client that relaxes those rules lets a server use it for server-side request forgery and can leak the user's credential to other resources.
 
 Binding the tool name, arguments, and file URIs in `requestState`, and consuming each file URI
 once, prevents a client from uploading under one call's authorization and attaching the file to
@@ -462,7 +456,7 @@ upload, and a digest mismatch.
    would let a server combine an upload with an elicitation in one round trip, at the cost of a
    change to the specification. Is that worth it?
 2. **Mandatory digest.** Requiring `digest` closes the byte-replacement gap for `omit` targets,
-   but browsers cannot hash a large file incrementally with Web Crypto.
+   but Web Crypto cannot hash a large file in chunks, so browsers have to read the whole file first.
 3. **Authorization methods.** The working group agreed to list every method it has to support,
    including storage that needs a credential separate from the MCP one and HTTP Message
    Signatures.
