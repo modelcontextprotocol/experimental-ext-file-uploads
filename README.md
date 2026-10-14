@@ -1,51 +1,45 @@
 # experimental-ext-file-uploads
 
-Experimental MCP extension for handing files from a client to a tool without routing the
-bytes through the model or through JSON-RPC. Maintained by the
+Experimental MCP extension for sending files from a client to a tool out of band, so the bytes
+stay out of model context and out of JSON-RPC messages. Maintained by the
 [File Uploads Working Group](https://modelcontextprotocol.io/community/working-groups/file-uploads).
 
 > [!IMPORTANT]
 > This is an [experimental extension](https://modelcontextprotocol.io/extensions/overview#experimental-extensions).
-> It is not part of the MCP specification, has not been proposed as a SEP, and will change
-> without notice while the working group iterates on it. Do not ship it in production clients
-> or servers.
+> It is not part of the MCP specification and has not been proposed as a SEP. Expect breaking
+> changes while the working group iterates.
 
-## What this is
+## Overview
 
-A server marks file-valued tool arguments in its input schema. When a client calls such a
-tool with a file that is too large to inline, it sends the file's metadata with the other
-arguments; the server either rejects the call on that basis or answers with an upload target
-inside a multi-round-trip `InputRequiredResult`; the client sends the bytes out of band and
-retries the call with the server-issued file URI. Small files travel inline as `data:` URIs.
-No new top-level methods, no session state.
+A server marks file arguments in a tool's input schema. To send a file too large to inline, the
+client calls the tool with a placeholder in the file argument and the file's metadata in request
+`_meta`. The server rejects the call or returns an `upload_required` result with an upload
+target. The client uploads the bytes to that target and retries the call with the file URI the
+server issued. Small files go inline as `data:` URIs.
 
-The working draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
-A reference implementation will live in this repository alongside it.
+The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
+The reference implementation will live in this repository.
 
 ## Background
 
-- [Files Working Group meeting notes, October 2, 2026](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3412),
-  where the group settled the problem statement, the metadata-first ordering, and the
-  decision to build on multi-round-trip requests and ship as an extension first.
+- [Working group meeting notes, October 2, 2026](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3412)
 - [SEP-2356: Declarative File Inputs](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356)
-  (closed), which this draft reuses for the `x-mcp-file` keyword and inline encoding.
+  (closed), source of the `x-mcp-file` keyword and inline encoding
 - [SEP-2631: File Objects and Transfer](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631),
-  prior art for file URIs and transfer descriptors, which this work is expected to supersede
-  for the upload direction.
+  prior art for file URIs and transfer descriptors
 - [SEP-2532: Resource Streaming](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2532),
-  adjacent work on the download direction.
+  related work on getting file bytes from a server
 
 ## Participating
 
-Discussion happens in the Files WG thread on the
-[MCP Discord](https://modelcontextprotocol.io/community/communication#discord) and in issues
-and pull requests here. The group meets weekly; notes are posted as GitHub Discussions in the
-main specification repository.
+The working group meets weekly and discusses this work in its thread on the
+[MCP Discord](https://modelcontextprotocol.io/community/communication#discord). Open an issue or
+pull request here for anything specific to the draft.
 
-Feedback that is most useful right now: whether the flow in the draft maps onto your storage
-backend's upload API, which of the [open questions](specification/draft/file-uploads.md#open-questions)
-matter to you, and anything in the security model that would stop you from deploying it.
+We want to hear whether the flow fits your storage backend's upload API, which
+[open questions](specification/draft/file-uploads.md#open-questions) block you, and whether
+anything in the security model would stop you from deploying it.
 
 ## License
 
-Apache 2.0, see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
