@@ -1,0 +1,15 @@
+{
+  "capabilities": {
+    "tools": {},
+    "extensions": {
+      "io.modelcontextprotocol/files": {
+        "fileArguments": "object-v1",
+        "upload": "mrtr-v1",
+        "inline": [
+          "base64"
+        ],
+        "maxInlineBytes": 1048576
+      }
+    }
+  }
+}

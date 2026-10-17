@@ -11,11 +11,15 @@ stay out of model context and out of JSON-RPC messages. Maintained by the
 
 ## Overview
 
-A server marks file arguments in a tool's input schema. To send a file too large to inline, the
-client calls the tool with a placeholder in the file argument and the file's metadata in request
-`_meta`. The server rejects the call or returns an `upload_required` result with an upload
-target. The client uploads the bytes to that target and retries the call with the file URI the
-server issued. Small files go inline as `data:` URIs.
+A server marks structured file arguments with `x-mcp-file`. Every file carries a client ID,
+media type, decoded size and digest. Optional base64 `data` carries inline bytes; absent `data`
+causes the server to request an upload after seeing the full tool call. The client uploads
+raw bytes and retries with unchanged arguments plus correlated per-file input responses.
+
+This is a proposed experimental wire revision requiring an extension point in core MRTR.
+The namespaced upload input request is not currently a permitted core member. It replaces
+the earlier draft's URI placeholders, pending metadata and `upload_required` result; the
+negotiated `object-v1` / `mrtr-v1` profile makes that breaking change explicit.
 
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
 The reference implementation will live in this repository.

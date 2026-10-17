@@ -1,0 +1,67 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "save_to_folder",
+    "arguments": {
+      "folderId": "fld_eu_123",
+      "files": [
+        {
+          "id": "file-1",
+          "name": "hello.txt",
+          "mimeType": "text/plain",
+          "size": 5,
+          "digest": {
+            "algorithm": "sha-256",
+            "value": "LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ"
+          }
+        },
+        {
+          "id": "file-2",
+          "name": "notes.txt",
+          "mimeType": "text/plain",
+          "size": 12,
+          "digest": {
+            "algorithm": "sha-256",
+            "value": "-VexlSmQaWGTPFww-HE8UAqbtdnQaVxA1IyXomo1lOw"
+          }
+        }
+      ]
+    },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "file-example-host",
+        "version": "0.1.0"
+      },
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/files": {
+            "fileArguments": "object-v1",
+            "upload": "mrtr-v1",
+            "inline": [
+              "base64"
+            ]
+          }
+        }
+      }
+    },
+    "requestState": "opaque-invocation-state-1",
+    "inputResponses": {
+      "uploads": {
+        "resultType": "complete",
+        "files": [
+          {
+            "fileId": "file-1",
+            "status": "completed"
+          },
+          {
+            "fileId": "file-2",
+            "status": "failed"
+          }
+        ]
+      }
+    }
+  }
+}

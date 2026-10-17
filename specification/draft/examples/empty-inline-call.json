@@ -1,0 +1,42 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "save_to_folder",
+    "arguments": {
+      "folderId": "fld_eu_123",
+      "files": [
+        {
+          "id": "empty-1",
+          "name": "empty.txt",
+          "mimeType": "text/plain",
+          "size": 0,
+          "digest": {
+            "algorithm": "sha-256",
+            "value": "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+          },
+          "data": ""
+        }
+      ]
+    },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "file-example-host",
+        "version": "0.1.0"
+      },
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/files": {
+            "fileArguments": "object-v1",
+            "upload": "mrtr-v1",
+            "inline": [
+              "base64"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

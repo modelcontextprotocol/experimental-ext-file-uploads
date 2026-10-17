@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Upload input response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "resultType",
+    "files"
+  ],
+  "properties": {
+    "resultType": {
+      "const": "complete"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "fileId",
+          "status"
+        ],
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
