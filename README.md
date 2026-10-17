@@ -11,15 +11,9 @@ stay out of model context and out of JSON-RPC messages. Maintained by the
 
 ## Overview
 
-A server marks structured file arguments with `x-mcp-file`. Every file carries a client ID,
-media type, decoded size and digest. Optional base64 `data` carries inline bytes; absent `data`
-causes the server to request an upload after seeing the full tool call. The client uploads
-raw bytes and retries with unchanged arguments plus correlated per-file input responses.
-
-This is a proposed experimental wire revision requiring an extension point in core MRTR.
-The namespaced upload input request is not currently a permitted core member. It replaces
-the earlier draft's URI placeholders, pending metadata and `upload_required` result; the
-negotiated `object-v1` / `mrtr-v1` profile makes that breaking change explicit.
+A server marks file arguments in a tool's input schema. Each file argument contains its metadata
+and optional base64 data. When data is absent, the server rejects the call or requests an upload.
+The client uploads the bytes and retries with unchanged arguments and per-file outcomes.
 
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
 The reference implementation will live in this repository.

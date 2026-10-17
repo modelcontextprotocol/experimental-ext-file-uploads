@@ -1,6 +1,6 @@
 # File Uploads Extension
 
-- **Status**: Proposed experimental revision; depends on a base MRTR extension point, not currently interoperable
+- **Status**: Experimental draft, not yet proposed as a SEP
 - **Extension Identifier**: `io.modelcontextprotocol/files` (provisional)
 - **Working Group**: [File Uploads](https://modelcontextprotocol.io/community/working-groups/file-uploads)
 - **Editors**: Den Delimarsky (@localden)
@@ -11,22 +11,14 @@ The working group writes this draft in SEP form so it can submit it as an Extens
 
 ## Abstract
 
-This proposed revision defines a structured file argument containing an opaque client-generated
-ID, media type, decoded byte size and SHA-256 digest, with an optional base64 `data` field.
-Every argument marked `x-mcp-file` uses that shape. Present `data` carries an inline file;
-absent `data` asks the server to arrange an out-of-band upload after seeing the intended tool,
-destination and complete metadata. No placeholder, file URI or separate pending-metadata map
-is needed.
+This extension lets a client send a file to a tool without passing a large file's bytes through
+the model or a JSON-RPC message. A server marks file arguments with the `x-mcp-file` keyword
+first proposed in [SEP-2356](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356).
+The client calls the tool with the file's metadata in the file argument and optional base64 data.
+If data is absent, the server can reject the call on the metadata or request an upload to an HTTPS
+target. The client uploads the bytes and retries with the same arguments and a per-file outcome.
 
-The proposed upload member reuses `InputRequiredResult`. After uploading, the client retries
-with exactly the same tool arguments, opaque `requestState`, and correlated `inputResponses`
-containing per-file completion statuses. The server verifies stored bytes before execution.
-
-**This is a proposed wire change, not a description of current MCP support.** The base MRTR
-input-request union needs an extension point before this upload member is valid. This revision
-selects that direction for review rather than simultaneously defining two wire profiles.
-It replaces this draft's earlier `upload_required` result and URI-substitution design.
-Downloads and resumable transfer remain future work.
+This revision covers uploads. [Future Work](#future-work) lists downloads, chunked and resumable transfer, and file fields in elicitation forms.
 
 ## Motivation
 
@@ -75,109 +67,78 @@ gateway acting for it. _Host_ is the application that presents the model and the
 
 ### Negotiation
 
-The extension identifier and method below are provisional. Clients declare this exact proposed
-profile in `io.modelcontextprotocol/clientCapabilities` on every participating request:
+A client that can perform out-of-band uploads declares the extension, with no settings, in the
+`io.modelcontextprotocol/clientCapabilities` request metadata of every request that may need it:
 
 ```json
-{"extensions":{"io.modelcontextprotocol/files":{
-  "fileArguments":"object-v1","upload":"mrtr-v1","inline":["base64"]
-}}}
+{ "extensions": { "io.modelcontextprotocol/files": {} } }
 ```
 
-Servers advertise the same profile in `server/discover`, together with `maxInlineBytes`:
+A server that accepts out-of-band uploads advertises the extension in `server/discover`:
 
 ```json
 {
   "capabilities": {
     "tools": {},
     "extensions": {
-      "io.modelcontextprotocol/files": {
-        "fileArguments": "object-v1",
-        "upload": "mrtr-v1",
-        "inline": [
-          "base64"
-        ],
-        "maxInlineBytes": 1048576
-      }
+      "io.modelcontextprotocol/files": { "maxInlineBytes": 1048576 }
     }
   }
 }
 ```
 
-`maxInlineBytes` is required and is the maximum aggregate decoded inline size per call.
-Zero explicitly disables inline transfer. An absent field or mismatched profile is not support.
-Clients **MUST NOT** dispatch this file-object contract unless the server advertises it;
-servers **MUST NOT** issue upload input requests unless the client declares the exact profile.
-The base MRTR extension point and SDK dispatch support are additional prerequisites: these
-capabilities do not override current core restrictions.
+`maxInlineBytes` is the largest total decoded size of inline `data` values the server accepts in
+one request. If the server omits it, clients **SHOULD** use out-of-band transfer for any file larger
+than a small, implementation-defined size.
 
-Servers **MUST** reject unsupported or oversized inline values as tool input errors, without
-silently treating their bytes as absent. The host chooses inline versus out-of-band before
-dispatch; switching paths requires a new logical call because `arguments` stay unchanged.
+Clients **MUST NOT** use this extension with a server that did not advertise it. Servers report an
+oversized inline `data` value as a tool error, following
+[SEP-1303](https://modelcontextprotocol.io/seps/1303-input-validation-errors-as-tool-execution-errors),
+and **MAY** return `MissingRequiredClientCapabilityError` (`-32021`) instead when the request
+did not declare the extension.
 
 ### File arguments
 
-A tool marks each file-value schema with `x-mcp-file`. The marked schema **MUST** require the
-object shape defined in [file-input.schema.json](examples/file-input.schema.json), including
-array item schemas. Required properties are `id`, `mimeType`, `size` and `digest`. `name` and
-`data` are optional. A conforming marked schema may tighten constraints, but **MUST NOT**
-permit another representation or weaken required fields and their types. The host recognizes
-file fields by the marker, not by guessing from an object's property names.
+A server marks a file argument by adding `x-mcp-file` to an object schema in `Tool.inputSchema`,
+including array items. The keyword's value has the `FileInputDescriptor` shape, and the marked
+schema **MUST** require the `FileInput` shape below:
 
 ```typescript
-interface FileInput {
-  /** Opaque client-generated ID, unique per file argument occurrence in this logical call. */
-  id: string;
-  /** Display name only; never a storage path or identity. */
-  name?: string;
-  /** "application/octet-stream" when unknown. */
-  mimeType: string;
-  /** Decoded bytes, integer 0..2^53-1. */
-  size: number;
-  digest: { algorithm: "sha-256"; value: string /* canonical base64url, no padding */ };
-  /** Canonical RFC 4648 standard base64 with padding when needed. */
-  data?: string;
+interface FileInputDescriptor {
+  /** Media types or dot-prefixed extensions to filter a file picker to. A hint only. */
+  accept?: string[];
+  /** Largest decoded size of each file, in bytes, on any transfer path. */
+  maxSize?: number;
 }
 
-interface FileInputDescriptor {
-  /** File-picker hint, not proof of content type. */
-  accept?: string[];
-  /** Maximum decoded size per file on every transfer path. */
-  maxSize?: number;
+interface FileInput {
+  /** Unique per file argument in this tool call. */
+  id: string;
+  name?: string;
+  /** "application/octet-stream" if unknown. */
+  mimeType: string;
+  /** Non-negative integer; decoded size in bytes. */
+  size: number;
+  digest: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
+  /** RFC 4648 base64-encoded file bytes; absent for out-of-band uploads. */
+  data?: string;
 }
 ```
 
-The ID contains 1..128 ASCII letters, digits, `_` or `-`. It is a correlation label, not a URI,
-filename, authorization, storage address, or server-reusable reference. Duplicate IDs in a
-call **MUST** be rejected, even when two argument occurrences refer to identical bytes.
-The host may assign different IDs to the same selected bytes used in different arguments.
-There is no cross-call reuse implied by an ID or digest.
+SEP-2356 applied `maxSize` to inline values only. This extension applies it to every file, as
+SEP-2631 proposed.
 
-If `data` is present, the file is inline. `data: ""` represents an empty inline file; `null`
-is invalid. If `data` is absent, bytes require an upload. Servers **MUST** verify canonical
-base64, decoded size, SHA-256 digest and content policy. JSON Schema's `contentEncoding`
-annotation alone does not perform these checks. Hash the original bytes, not base64 characters;
-`size` counts those same original bytes. This revision requires a digest even for inline data.
+The `id` identifies a file argument within the call and **MUST** be unique in that call. The
+digest is SHA-256 over the original bytes. Present `data` carries the file inline (`""` carries an
+empty file); absent `data` requests out-of-band upload. Servers **MUST** validate the decoded
+size and digest before using the bytes.
 
-For example, the `files.items` property of [this complete tool schema](examples/tool.json)
-requires the canonical object and carries `x-mcp-file: {accept: ["text/plain"], maxSize: 65536}`.
-[inline-call.json](examples/inline-call.json) contains a complete inline call with real bytes
-and digest; [empty-inline-call.json](examples/empty-inline-call.json) demonstrates presence
-rather than truthiness of `data`.
+Hosts:
 
-Hosts **MUST** populate file metadata and bytes from a selected or policy-approved local file,
-and obtain approval for sending it to this server and the server-designated storage. They
-**SHOULD NOT** expose file schemas directly to a model generating arguments as tokens.
-A host may expose a short local selector, then resolve it and construct the complete object
-before dispatch. This projection is outside the wire contract. File bytes, upload targets,
-credentials and state **MUST NOT** enter model context. The host retains the authoritative
-arguments for retries instead of asking the model to reconstruct them.
-
-This profile supports statically reachable file fields under object `properties` and array
-`items`. Unresolved references and schema compositions containing file markers are unsupported;
-hosts **MUST** fail explicitly rather than guess a traversal. Wrapper/executor tools need an
-explicitly exposed inner schema or another negotiated discovery contract before a host can
-perform this handling; this revision does not solve hidden inner-tool discovery.
+- **SHOULD NOT** show `x-mcp-file` properties to a model that emits arguments as tokens.
+- **MUST** bind a file to an argument only on the user's selection or under the host's approval
+  policy for model-supplied values.
+- **MUST NOT** place file bytes or upload URLs in model context.
 
 ### Upload flow
 
@@ -186,24 +147,24 @@ sequenceDiagram
     participant C as Client
     participant S as MCP server
     participant T as Upload target
-    C->>S: tools/call with file objects; data absent for OOB
+
+    C->>S: tools/call with file metadata in arguments
     alt rejected on metadata
         S-->>C: CallToolResult {isError: true}
-    else upload needed
-        S-->>C: input_required + files/upload + requestState
-        C->>T: PUT raw bytes
+    else accepted
+        S-->>C: input_required {inputRequests, requestState}
+        C->>T: PUT bytes
         T-->>C: 2xx
         C->>S: same arguments + requestState + inputResponses
-        S->>T: Confirm stored bytes and integrity
         S-->>C: CallToolResult
     end
 ```
 
 #### Initial call
 
-The client sends complete tool arguments with all file metadata inside the corresponding
-file objects. It omits `data` for each out-of-band file. No `pending` metadata appears in
-request `_meta`; ordinary MCP protocol/client/capability metadata is still required.
+The client sends `tools/call` with every argument populated and omits `data` for each file it
+will upload out of band. The examples omit standard request `_meta` fields for readability;
+the base protocol and [Negotiation](#negotiation) requirements still apply.
 
 ```json
 {
@@ -213,45 +174,15 @@ request `_meta`; ordinary MCP protocol/client/capability metadata is still requi
   "params": {
     "name": "save_to_folder",
     "arguments": {
-      "folderId": "fld_eu_123",
-      "files": [
-        {
-          "id": "file-1",
-          "name": "hello.txt",
-          "mimeType": "text/plain",
-          "size": 5,
-          "digest": {
-            "algorithm": "sha-256",
-            "value": "LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ"
-          }
-        },
-        {
-          "id": "file-2",
-          "name": "notes.txt",
-          "mimeType": "text/plain",
-          "size": 12,
-          "digest": {
-            "algorithm": "sha-256",
-            "value": "-VexlSmQaWGTPFww-HE8UAqbtdnQaVxA1IyXomo1lOw"
-          }
-        }
-      ]
-    },
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientInfo": {
-        "name": "file-example-host",
-        "version": "0.1.0"
-      },
-      "io.modelcontextprotocol/clientCapabilities": {
-        "extensions": {
-          "io.modelcontextprotocol/files": {
-            "fileArguments": "object-v1",
-            "upload": "mrtr-v1",
-            "inline": [
-              "base64"
-            ]
-          }
+      "folderId": "fld_8c1a",
+      "file": {
+        "id": "file-1",
+        "name": "Q3 report.pdf",
+        "mimeType": "application/pdf",
+        "size": 41204133,
+        "digest": {
+          "algorithm": "sha-256",
+          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
         }
       }
     }
@@ -259,19 +190,20 @@ request `_meta`; ordinary MCP protocol/client/capability metadata is still requi
 }
 ```
 
-The server **SHOULD** reject unauthorized destination, quota, residency, name collision or
-declared-size/type violations before allocating upload targets. It **MUST** treat all metadata
-as client-asserted, including digest, and **MUST NOT** infer trust from schema validation.
-An all-inline call can complete immediately after verification. Mixed inline and absent-data
-files are permitted, subject to aggregate inline and per-file limits.
+Before sending the initial call, the host **MUST** obtain the user's approval, or apply operator
+policy when no user is present, for sending the file to this server and to storage the server
+designates.
 
-#### Upload input request
+Servers **SHOULD** run every check that does not need the bytes (destination authorization,
+quota, `accept` and `maxSize`, name collisions) and return a `CallToolResult` with
+`isError: true` if one fails. Servers **MUST** treat the metadata as client-asserted and re-check
+size, digest, and type once the bytes arrive.
 
-For files whose bytes are still needed, the server returns `InputRequiredResult` with the
-input-request key `uploads` and the proposed namespaced upload member. This profile assigns
-that key to one batched upload request per round; it is not a globally reserved MCP key.
-Other input requests use different keys. The matching input response uses the same `uploads`
-key; each `fileId` identifies one file argument occurrence in this invocation:
+#### Upload required
+
+If the server accepts the files, it returns an `InputRequiredResult` with one upload input
+request under `inputRequests.uploads`. The method below is proposed by this extension; using it
+requires a core MRTR extension point because the current input-request union is closed.
 
 ```json
 {
@@ -279,99 +211,89 @@ key; each `fileId` identifies one file argument occurrence in this invocation:
   "id": 1,
   "result": {
     "resultType": "input_required",
-    "requestState": "opaque-invocation-state-1",
     "inputRequests": {
       "uploads": {
         "method": "io.modelcontextprotocol/files/upload",
         "params": {
-          "files": [
-            {
-              "fileId": "file-1",
-              "url": "https://upload.example.com/u/1",
-              "headers": {
-                "Content-Type": "text/plain"
-              },
-              "credentials": "omit",
-              "expiresAt": "2026-10-16T23:05:00Z"
+          "files": [{
+            "fileId": "file-1",
+            "url": "https://upload.example.com/u/01JD3V7K2M?sig=...",
+            "headers": {
+              "Content-Type": "application/pdf",
+              "x-amz-checksum-sha256": "uU0nuZNNPgilLlLX2n2r+sSE7+N6U4D6ZVe+/rYh2sU="
             },
-            {
-              "fileId": "file-2",
-              "url": "https://upload.example.com/u/2",
-              "headers": {
-                "Content-Type": "text/plain"
-              },
-              "credentials": "omit",
-              "expiresAt": "2026-10-16T23:05:00Z"
-            }
-          ]
+            "credentials": "omit"
+          }]
         }
       }
-    }
+    },
+    "requestState": "..."
   }
 }
 ```
 
 ```typescript
-interface UploadInputParams {
-  files: UploadTarget[];
+interface UploadInputRequest {
+  method: "io.modelcontextprotocol/files/upload";
+  params: { files: UploadTarget[] };
 }
+
 interface UploadTarget {
+  /** The corresponding FileInput.id in the original arguments. */
   fileId: string;
+  /** Absolute https URL. The client sends the bytes with PUT. */
   url: string;
+  /** Headers the client sends with the PUT. */
   headers?: { [name: string]: string };
+  /**
+   * "omit": the URL authorizes itself. "include": the client attaches the credential it
+   * presents to the MCP server. See Upload targets.
+   */
   credentials: "omit" | "include";
-  /** RFC 3339 UTC deadline, no later than this request state's validity. */
-  expiresAt: string;
 }
 ```
 
-The method `io.modelcontextprotocol/files/upload` is proposed here; it is not currently a
-permitted core MRTR member. Each target **MUST** identify one non-inline file in the original
-arguments by `fileId`, which equals that file object's `id`. A batch **MUST NOT** contain
-duplicate `fileId` values. Each file has at most one outstanding target in a round.
-The client **MUST** reject unknown, inline, duplicate or mismatched file targets before sending
-bytes. It **MUST** bind each target to its original selected-file metadata and recheck that
-local bytes match before transfer. It **MUST NOT** follow a target for model-supplied arbitrary
-paths or silently select a different file.
+Servers **MUST** return an upload input request only on `tools/call` and only to a request that
+declared the extension. Each `fileId` **MUST** match one file argument without `data`, and each
+file **MUST** have at most one outstanding target in the current round. A server using the
+[Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview) **MUST** return
+the upload input request before creating a task.
 
-The server **MUST** bind the authenticated principal, logical invocation ID, tool name, full
-arguments including metadata, file IDs and their argument locations, each file's currently
-issued target and backend staging object, input-request keys, round and expiry to
-integrity-protected `requestState` or server-side state. The server uses the echoed state and
-`fileId` to resolve exactly one currently authorized target and staging object. A `fileId` alone
-does not identify a transfer across invocations or grant access. Backend transfer handles stay
-internal to the server and are not included in the client response.
-There is no file-value exclusion from the argument digest. State is opaque to the client.
-Changing any argument, including `data` presence, starts a new invocation and requires new
-authorization. A Tasks server **MUST** resolve required uploads before creating the task.
+Servers **MUST** bind the authenticated principal, tool name, all arguments, and the current
+target for each file to `requestState`, which follows the
+[MRTR server rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#server-requirements-basic-workflow).
+Clients handle `requestState` as the
+[MRTR client rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#client-requirements-basic-workflow)
+require for `InputRequiredResult`.
 
-Targets **SHOULD** write to staging and enforce size. Final-destination targets **MUST** enforce
-declared size and digest where supported. Expired/abandoned staging **SHOULD** be reclaimed.
-Request expiry applies to the retry as well as transfer; a client must finish before the
-deadline, not merely begin PUT. Expired state requires a new logical invocation.
+Servers **SHOULD** issue targets that write to a staging location and enforce the declared size.
+A target that writes to the final destination **MUST** enforce the declared size, and the
+digest where the backend supports it. Servers **SHOULD** rely on storage-side expiry to reclaim
+uploads with no retry.
 
 #### Transfer
 
-The client applies [Upload targets](#upload-targets) to each URL and sends raw bytes with PUT.
-Inline base64 is a JSON encoding only; HTTP uploads carry decoded bytes. A `2xx` response permits
-a completion report, but does not prove to the server that valid bytes exist. Clients **MUST**
-send no more than declared size and bound concurrency and total work per invocation.
-For retryable transfer failures, the client **MUST** stop after at most three total HTTP
-transfer attempts per file per logical invocation (the initial attempt plus up to two retries),
-counted across any MRTR rounds and replacement targets. Retry only while safe, authorized and
-before expiry, with bounded backoff; permanent failure or unsafe retry ends attempts immediately.
-They **MUST NOT** follow redirects or continue past target expiry.
+For each `UploadTarget` the client checks the target against [Upload targets](#upload-targets),
+sends a PUT to `url` with `headers` and the file bytes as the body, and treats a `2xx`
+response as success. Clients **MUST NOT** send more bytes than the declared `size`, and
+**MUST** limit retryable transfer failures to three total HTTP attempts per file per logical call.
+Clients **MUST** stop sooner if a failure is permanent or retrying is unsafe.
 
-A gateway holding the MCP credential but not the bytes can relay an `include` upload under
-the existing canonical-origin/path rules or pass an `omit` target to the host. Browser-target
-storage **SHOULD** support the required CORS preflight. Upload handling and retry proceed
-without another model turn; results and logs **MUST NOT** reveal transfer credentials or URLs.
+The component that holds the bytes performs the transfer. A gateway that holds the credential
+but not the bytes can pass `omit` targets to the host, or rewrite an `include` target's `url` to
+a relay at its own origin and proxy it.
 
-#### Retry and per-file outcomes
+Clients **MUST** complete the upload and retry without returning control to the model. Servers
+**SHOULD NOT** echo upload URLs in the `CallToolResult`.
 
-The client retries with a new JSON-RPC ID, the exact same `name` and JSON value of `arguments`,
-the exact opaque `requestState`, and the result under `inputResponses.uploads`, matching the
-latest outstanding `inputRequests.uploads`:
+Servers that issue `omit` targets to browser clients **SHOULD** configure the storage to answer
+the CORS preflight for the listed headers.
+
+#### Retry
+
+The client retries `tools/call` with a new JSON-RPC ID, the same tool name and exact arguments,
+the echoed `requestState`, and one outcome for each requested file under
+`inputResponses.uploads`:
 
 ```json
 {
@@ -381,142 +303,49 @@ latest outstanding `inputRequests.uploads`:
   "params": {
     "name": "save_to_folder",
     "arguments": {
-      "folderId": "fld_eu_123",
-      "files": [
-        {
-          "id": "file-1",
-          "name": "hello.txt",
-          "mimeType": "text/plain",
-          "size": 5,
-          "digest": {
-            "algorithm": "sha-256",
-            "value": "LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ"
-          }
-        },
-        {
-          "id": "file-2",
-          "name": "notes.txt",
-          "mimeType": "text/plain",
-          "size": 12,
-          "digest": {
-            "algorithm": "sha-256",
-            "value": "-VexlSmQaWGTPFww-HE8UAqbtdnQaVxA1IyXomo1lOw"
-          }
-        }
-      ]
-    },
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientInfo": {
-        "name": "file-example-host",
-        "version": "0.1.0"
-      },
-      "io.modelcontextprotocol/clientCapabilities": {
-        "extensions": {
-          "io.modelcontextprotocol/files": {
-            "fileArguments": "object-v1",
-            "upload": "mrtr-v1",
-            "inline": [
-              "base64"
-            ]
-          }
+      "folderId": "fld_8c1a",
+      "file": {
+        "id": "file-1",
+        "name": "Q3 report.pdf",
+        "mimeType": "application/pdf",
+        "size": 41204133,
+        "digest": {
+          "algorithm": "sha-256",
+          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
         }
       }
     },
-    "requestState": "opaque-invocation-state-1",
+    "requestState": "...",
     "inputResponses": {
       "uploads": {
         "resultType": "complete",
-        "files": [
-          {
-            "fileId": "file-1",
-            "status": "completed"
-          },
-          {
-            "fileId": "file-2",
-            "status": "completed"
-          }
-        ]
+        "files": [{ "fileId": "file-1", "status": "completed" }]
       }
     }
   }
 }
 ```
 
-```typescript
-interface UploadInputResponse extends Result {
-  /** The input request was answered; individual files can still have failed. */
-  resultType: "complete";
-  files: {
-    fileId: string;
-    status: "completed" | "failed";
-  }[];
-}
-```
+`resultType: "complete"` means the upload input request was answered; each file's `status` is
+`completed` if the client observed a successful transfer, or `failed` if it did not. A failed
+file ends this logical call. Clients **MUST NOT** include upload URLs or credentials in the response.
 
-`completed` means the client observed successful HTTP transfer. `failed` is terminal for that
-file in this logical invocation: retryable failures exhausted the three-attempt budget, or an
-earlier permanent failure or unsafe retry prevented completion. Three attempts means three
-HTTP transfers, not three MCP calls or three retries. Reporting failure does not authorize more
-upload attempts. A host that abandons the call sends no continuation; the server reclaims
-staging on expiry. The result object follows MRTR's result shape: `resultType: "complete"`
-means the upload input request has been answered, not that all reported files succeeded.
-Detailed backend responses, URLs and headers are not echoed. A storage receipt/commit-token
-profile is separate work; this version supports backends the server can independently verify
-and finalize. No arbitrary client response header is trusted as proof.
+On the retry the server:
 
-Servers **MUST** reject duplicate or unknown file IDs, unknown statuses, and entries not bound
-to an outstanding target for that file in the echoed state and input-request key. Missing
-entries are unresolved, not success. [partial-retry.json](examples/partial-retry.json) shows a
-mixed outcome report.
+1. Verifies `requestState` and returns JSON-RPC error `-32602` if verification fails.
+2. Rejects the call if the tool name or any argument differs from the values bound in `requestState`.
+3. Rejects duplicate or unknown file IDs and unknown statuses. If any file has status `failed`,
+   returns a `CallToolResult` with `isError: true` without running the tool. A missing outcome is
+   unresolved; the server follows MRTR error handling and **MUST NOT** run the tool.
+4. Confirms with the storage backend that each file's bytes arrived (for example with a HEAD
+   request or a session status query), verifies `digest`, and re-checks size and type. Servers
+   **MUST NOT** run the tool with a file whose bytes they have not confirmed.
+5. Performs any finalize step the backend needs, runs the tool, and returns its result.
 
-Before execution, the server:
-
-1. Verifies principal, state integrity, expiry, invocation identity, tool name and every original
-   argument; invalid state or changed arguments return JSON-RPC error `-32602`.
-2. Validates the correlated input response. Any `failed` entry ends the invocation with a tool
-   execution error; the server **MUST NOT** run the tool or reissue that file in this invocation
-   and **SHOULD** reclaim staged uploads. A separately authorized new invocation is independent.
-3. Independently confirms each completed upload with its backend, compares actual decoded
-   size and digest, and rechecks actual content/type and other authorization requirements.
-   Invalid bytes produce a tool error and **MUST NOT** be consumed by the tool.
-4. If no report failed but a report is missing or bytes are not yet visible, returns a further
-   `InputRequiredResult` for only unresolved files, or a bounded terminal tool error. It binds
-   verified files into the next state so they need not be uploaded again. The client echoes
-   the newest state and responds under `uploads` on the next retry. This does not reset any
-   file's transfer-attempt budget.
-5. Finalizes verified objects, atomically claims the logical invocation, executes once and
-   retains its terminal result for authenticated identical retries until invocation expiry.
-
-When requesting an unresolved file again, the server **SHOULD** preserve a still-valid target.
-A client that already observed successful PUT may repeat its `completed` report without another
-PUT only if the target descriptor for that `fileId` is identical to the one it used. The server
-**MUST** keep an unchanged target descriptor bound to the same staging object in this invocation.
-If the descriptor changes, the server **MUST** issue a fresh `requestState` and atomically supersede
-the previous round; the old target **MUST** be revoked or isolated so that late writes cannot
-satisfy or overwrite the replacement. A completion associated with the old state **MUST NOT**
-satisfy the new round. If the server cannot enforce these rules, it **MUST** fail the invocation
-instead of replacing the target. The server **MUST NOT** re-request a verified file while keeping
-the same invocation's state.
-
-Concurrent or repeated completion reports **MUST NOT** execute the logical tool twice.
-The server **MUST** retain a completion/execution record through the state lifetime; after
-execution starts, duplicate retries return a retained result or a retryable state-only
-`InputRequiredResult` while the original execution is still running. After a crash with an
-unknown outcome, it **MUST NOT** blindly execute again; it must reconcile the operation or
-return an indeterminate-outcome error. This requires durable coordination for distributed or
-crash-resilient implementations, not only a signed state token. Consumed uploads **MUST** reject
-further PUTs. A target or staged object from an earlier invocation, principal or destination
-**MUST NOT** satisfy a later one.
-
-Success reports alone never satisfy a file argument. Execution requires all inline files and
-all out-of-band file occurrences to be verified. A file object without `data` remains unchanged
-even after successful upload: its verified bytes are resolved from invocation-bound state.
-
-Additional elicitation can use the same envelope once core support exists. Independent inputs
-may share a response; an input that could alter destination/authorization **MUST** be resolved
-before issuing targets. A revised destination is a new logical call, never an argument rewrite
-under an existing target. Mixed-input scheduling remains outside this profile's reference scope.
+The echoed state and `fileId` identify the current target. A replacement target requires a new
+state, and the server **MUST** prevent the old target from satisfying the new round. Servers
+**MUST NOT** accept stale state, use the same target for a different call, or execute a call
+twice on a repeated continuation.
 
 ### Upload targets
 
@@ -544,34 +373,21 @@ On stdio there is no canonical URI, so only `omit` targets apply.
 
 ### Why an upload input request
 
-Tool context must arrive before storage selection. This revision uses the existing
-`InputRequiredResult` envelope and a new upload member, rather than another general-purpose
-input-required result. It can share orchestration with other MRTR inputs and keeps full
-arguments stable. The [current MRTR rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr)
-allow only three built-in input-request methods; [issue #2919](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2919)
-discusses opening that union. Both request dispatch and response validation need an agreed
-extension contract. This proposed files capability cannot supply that core permission by itself.
+SEP-2631 negotiated uploads in a separate `files/authorizeUpload` call before `tools/call`. The
+server had to issue a regional upload URL before it saw the arguments, so it could not check the
+destination or quota first, and the two calls had no protocol-level link. Returning the upload target from `tools/call` lets the server see the full call first, and `requestState`
+carries the binding so any instance can serve the retry.
 
-The earlier `upload_required` result avoids that core dependency, at the cost of separate
-result handling. If the group chooses it for near-term deployment, it needs an explicitly
-negotiated profile with the same file objects and unchanged arguments but a separately defined
-completion channel. It must not silently reinterpret these `inputResponses` as valid under
-the earlier draft. This revision specifies only the MRTR profile for review.
+An upload input request can share the MRTR envelope with other inputs, but the current MRTR
+rules and schema allow only elicitation, sampling, and roots requests. This proposal therefore
+requires a change to the specification before clients and servers can interoperate.
 
-### Why a structured object and optional base64 data
+### Why a structured file argument
 
-Co-locating size and digest with file identity avoids a second metadata map and lets generic
-schema validators check their presence and types. The extension imposes a canonical argument
-shape using ordinary JSON Schema; `x-mcp-file` identifies the special host handling. A client
-ID correlates uploads without a custom URI scheme. A separate display name avoids using a
-filename as identity. Binding the target to the current invocation state and file ID avoids
-introducing a second public identifier for the same transfer.
-
-Optional `data` gives one binary-safe inline representation with no sentinel. Standard padded
-base64 works for every media type; it avoids a second raw-text encoding and the duplicated
-media type/escaping rules of a data URI. An empty string has an unambiguous meaning. Requiring
-the digest upfront costs a hash pass or host-maintained hash before calling the tool; this
-revision accepts that cost to bind both transfer paths to the same immutable bytes.
+SDKs and gateways can validate `arguments` against `inputSchema` before a handler runs, so the
+initial call cannot omit a required file argument. A structured value satisfies that schema and
+keeps the file's metadata together, without a parallel request `_meta` map or a placeholder URI.
+Omitting `data` distinguishes out-of-band upload from inline transfer.
 
 ### Why `omit` and `include`
 
@@ -593,68 +409,53 @@ support, and this pair is a starting point.
 
 ## Backward Compatibility
 
-This is an experimental breaking revision of the earlier files draft. URI-string file fields,
-pending `_meta`, `upload_required`, server-issued file URIs in arguments and automatic URI
-substitution are not this profile. The exact profile values above prevent silent mixing.
-Existing unrelated tools keep their schemas. A server exposing this file-object tool to a
-client without the profile must provide a separate compatible tool or reject the unsupported
-operation; it must not ask a model to synthesize base64 as a fallback.
+The extension is additive and off by default. A client that does not declare it never receives
+an upload input request. Tools that take base64 or URL strings today keep working.
 
-Unmodified MCP/RMCP cannot dispatch the proposed new input-request member today. An experimental
-SDK patch can demonstrate it, but is not interoperability or evidence of core adoption. Tool
-schema compilers that reject unknown keywords need support for the `x-mcp-file` annotation.
+SDKs need an MRTR extension point before they can carry the proposed upload input request.
 
 ## Security Implications
 
-[Upload targets](#upload-targets) retains the earlier draft's HTTPS, connected-address, redirect,
-header and canonical-credential boundaries. File IDs and names are untrusted labels;
-none grants authorization. State binds every file to its specific principal, tool, arguments,
-destination and invocation. Duplicate or racing retries require server-side execution records.
+[Upload targets](#upload-targets) covers requests the server directs the client to make.
+A client that relaxes those rules lets a server use it for server-side request forgery and can leak the user's credential to other resources.
 
-Servers validate received bytes, not only claimed size/digest, and apply content policy before
-execution. A digest identifies expected content; it does not prove safety or authority. Bound
-body sizes, record counts and retry work even for authenticated clients. Treat names as display
-metadata, never as trusted paths. Reclaim expired and abandoned uploads. Identical public error
-messages for unknown and inaccessible state avoid disclosing another user's file existence.
+Binding the principal, tool name, arguments, and upload targets to `requestState` prevents a
+client from uploading under one call's authorization and attaching the file to
+another call or a different destination. A target that enforces the declared size and digest
+prevents anyone who sees an `omit` URL from replacing the bytes before the retry.
 
-Hosts and servers **MUST** keep inline bytes, transfer URLs, headers, credentials and opaque
-request state out of model context, logs, traces and error details. `_meta` is not a privacy
-mechanism by itself; model projection and redaction must be enforced by the implementation.
-Server `CallToolResult` content should expose a safe operation summary and intended user-facing
-result only. Servers **SHOULD** follow
+Servers **SHOULD** follow
 [OWASP ASVS 5.0 V5](https://github.com/OWASP/ASVS/blob/v5.0.0/5.0/en/0x14-V5-File-Handling.md)
-for accepted file formats.
+for the formats they accept.
+
+Clients and servers **MUST** redact upload URLs, upload headers, and inline `data` values in logs,
+traces, and error reports.
 
 ## Reference Implementation
 
-This revision contains [machine-readable schemas and wire examples](examples/), not a runtime
-implementation. A reference implementation must cover object-schema validation, inline and
-out-of-band uploads, unchanged arguments, partial completion, negative outcomes, expired and
-forged state, mismatched IDs, byte-integrity failures and duplicate finalization. A patched SDK
-experiment must be labeled and tested separately from unmodified-core compatibility.
-
-Real OAuth, browser CORS, cloud-store finalization, large streaming transfers, persistence,
-cross-replica execution coordination and mixed-input orchestration need integration tests
-before production use. Static examples do not validate those properties.
+The reference implementation will include a TypeScript SDK branch with the upload input request
+and a client transfer helper, a reference server in front of an object store, and
+conformance scenarios for inline transfer, out-of-band transfer, rejection on metadata, a failed
+upload, and a digest mismatch.
 
 ## Open Questions
 
-1. **Envelope and core dependency.** Adopt the MRTR extension mechanism with this profile, or
-   define a separate `upload_required` profile and explicit migration? This draft recommends
-   MRTR and does not claim the new member is valid in current core.
-2. **Mandatory digest.** Is requiring a precomputed SHA-256 acceptable for large browser files,
-   or is a weaker, explicitly negotiated profile needed? This revision requires it.
-3. **Names and correlation.** Are `id`, `data`, `fileId` and the two outcome
-   strings the right public names? An opaque ID avoids implying that a filename is a URI.
-4. **Backend receipts.** Define a narrow typed receipt profile for backends requiring client
-   commit handles; do not relay arbitrary response headers or URLs as proof.
-5. **Authorization methods.** Credential audiences, separate storage credentials, same-origin
-   sibling paths and cross-origin targets need focused review. This patch retains the previous
-   target policy and does not broaden credential forwarding.
-6. **Wrapper/executor discovery.** How can a host obtain the effective file schema when an
-   executor hides the inner tool? This draft limits itself to explicitly available schemas.
-7. **Typed outputs/resources.** Define download detection and materialization separately;
-   generic URLs and familiar object-property names are not sufficient file markers.
+1. **MRTR extensibility.** How should the specification enable extension-defined input requests?
+2. **Mandatory digest.** Requiring `digest` closes the byte-replacement gap for `omit` targets,
+   but Web Crypto cannot hash a large file in chunks, so browsers have to read the whole file first.
+   Is that tradeoff acceptable?
+3. **Authorization methods.** The working group agreed to list every method it has to support,
+   including storage that needs a credential separate from the MCP one and HTTP Message
+   Signatures.
+4. **Finalize.** As written the server finalizes while handling the retry. Owners of backends
+   with an explicit commit step should confirm that works for them.
+5. **How the tool's typed result reaches the model**, raised at the October 2 meeting.
+6. **stdio.** Out-of-band `omit` targets work for stdio servers. Should anything more be defined
+   for them?
+7. **Resources.** Do resources fit this flow? Thomas Sarlandie took this as an action item on
+   October 2.
+8. **Multipart and POST.** Some storage APIs take only `multipart/form-data`. They can sit
+   behind a server proxy with `include`, or a later revision can add a `form` target.
 
 ## Future Work
 
