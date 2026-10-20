@@ -14,11 +14,9 @@ The working group writes this draft in SEP form so it can submit it as an Extens
 This extension lets a client send a file to a tool without passing a large file's bytes through
 the model or a JSON-RPC message. A server marks file arguments with the `x-mcp-file` keyword
 first proposed in [SEP-2356](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356).
-To send a file too large to inline, the client calls the tool with a placeholder in the file
-argument and the file's metadata in request `_meta`. The server can reject the call on that
-metadata. If it accepts, it returns an `upload_required` result with an HTTPS upload target and
-a server-issued file URI. The client uploads the bytes and retries the call with the file URI in
-place of the placeholder. Small files go inline as RFC 2397 `data:` URIs.
+The client calls the tool with the file's metadata in the file argument and optional base64 data.
+If data is absent, the server can reject the call on the metadata or request an upload to an HTTPS
+target. The client uploads the bytes and retries with the same arguments and a per-file outcome.
 
 This revision covers uploads. [Future Work](#future-work) lists downloads, chunked and resumable transfer, and file fields in elicitation forms.
 
@@ -89,22 +87,21 @@ A server that accepts out-of-band uploads advertises the extension in `server/di
 }
 ```
 
-`maxInlineBytes` is the largest total decoded size of `data:` values the server accepts in one
-request. If the server omits it, clients **SHOULD** use out-of-band transfer for any file larger
+`maxInlineBytes` is the largest total decoded size of inline `data` values the server accepts in
+one request. If the server omits it, clients **SHOULD** use out-of-band transfer for any file larger
 than a small, implementation-defined size.
 
-Clients **MUST NOT** send a placeholder or pending-file metadata to a server that did not
-advertise the extension. Servers report an oversized `data:` value as a tool error, following
+Clients **MUST NOT** use this extension with a server that did not advertise it. Servers report an
+oversized inline `data` value as a tool error, following
 [SEP-1303](https://modelcontextprotocol.io/seps/1303-input-validation-errors-as-tool-execution-errors),
 and **MAY** return `MissingRequiredClientCapabilityError` (`-32021`) instead when the request
 did not declare the extension.
 
 ### File arguments
 
-This section restates the parts of SEP-2356 this extension uses.
-
-A server marks a file argument by adding `x-mcp-file` to a property of the form
-`{"type": "string", "format": "uri"}` in `Tool.inputSchema`, including array items:
+A server marks a file argument by adding `x-mcp-file` to an object schema in `Tool.inputSchema`,
+including array items. The keyword's value has the `FileInputDescriptor` shape, and the marked
+schema **MUST** require the `FileInput` shape below:
 
 ```typescript
 interface FileInputDescriptor {
@@ -113,29 +110,35 @@ interface FileInputDescriptor {
   /** Largest decoded size of each file, in bytes, on any transfer path. */
   maxSize?: number;
 }
+
+interface FileInput {
+  /** Unique per file argument in this tool call. */
+  id: string;
+  name?: string;
+  /** "application/octet-stream" if unknown. */
+  mimeType: string;
+  /** Non-negative integer; decoded size in bytes. */
+  size: number;
+  digest: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
+  /** RFC 4648 base64-encoded file bytes; absent for out-of-band uploads. */
+  data?: string;
+}
 ```
 
 SEP-2356 applied `maxSize` to inline values only. This extension applies it to every file, as
 SEP-2631 proposed.
 
-An `x-mcp-file` value is one of:
-
-- An RFC 2397 `data:` URI. Clients use `application/octet-stream` when the media type is
-  unknown.
-- A placeholder beginning with `mcp-file:pending`, on the initial call of an out-of-band upload.
-  Clients **MAY** append a suffix (`mcp-file:pending:2`) to keep array items distinct.
-- A file URI the server issued in an `upload_required` result, on the retry.
-
-Servers **MUST** reject any other value and **MUST NOT** dereference it. Clients **MUST** treat
-file URIs as opaque and **MUST NOT** parse, resolve, or pass a file URI to any URI handler.
-Servers **SHOULD** mint file URIs under the `mcp-file:` scheme so proxies can recognize them.
+The `id` identifies a file argument within the call and **MUST** be unique in that call. The
+digest is SHA-256 over the original bytes. Present `data` carries the file inline (`""` carries an
+empty file); absent `data` requests out-of-band upload. Servers **MUST** validate the decoded
+size and digest before using the bytes.
 
 Hosts:
 
 - **SHOULD NOT** show `x-mcp-file` properties to a model that emits arguments as tokens.
 - **MUST** bind a file to an argument only on the user's selection or under the host's approval
   policy for model-supplied values.
-- **MUST NOT** place file bytes, upload URLs, or issued file URIs in model context.
+- **MUST NOT** place file bytes or upload URLs in model context.
 
 ### Upload flow
 
@@ -145,23 +148,23 @@ sequenceDiagram
     participant S as MCP server
     participant T as Upload target
 
-    C->>S: tools/call {file: "mcp-file:pending"}, _meta pending
+    C->>S: tools/call with file metadata in arguments
     alt rejected on metadata
         S-->>C: CallToolResult {isError: true}
     else accepted
-        S-->>C: upload_required {uploads, requestState}
+        S-->>C: input_required {inputRequests, requestState}
         C->>T: PUT bytes
         T-->>C: 2xx
-        C->>S: tools/call {file: "mcp-file:01JD..."}, requestState
+        C->>S: same arguments + requestState + inputResponses
         S-->>C: CallToolResult
     end
 ```
 
 #### Initial call
 
-The client sends `tools/call` with every argument populated, a placeholder in each out-of-band
-file argument or array item, and the pending files' metadata in request `_meta` under the
-extension identifier:
+The client sends `tools/call` with every argument populated and omits `data` for each file it
+will upload out of band. The examples omit standard request `_meta` fields for readability;
+the base protocol and [Negotiation](#negotiation) requirements still apply.
 
 ```json
 {
@@ -172,24 +175,14 @@ extension identifier:
     "name": "save_to_folder",
     "arguments": {
       "folderId": "fld_8c1a",
-      "file": "mcp-file:pending"
-    },
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientCapabilities": {
-        "extensions": { "io.modelcontextprotocol/files": {} }
-      },
-      "io.modelcontextprotocol/files": {
-        "pending": {
-          "/file": {
-            "name": "Q3 report.pdf",
-            "mimeType": "application/pdf",
-            "size": 41204133,
-            "digest": {
-              "algorithm": "sha-256",
-              "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
-            }
-          }
+      "file": {
+        "id": "file-1",
+        "name": "Q3 report.pdf",
+        "mimeType": "application/pdf",
+        "size": 41204133,
+        "digest": {
+          "algorithm": "sha-256",
+          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
         }
       }
     }
@@ -197,52 +190,41 @@ extension identifier:
 }
 ```
 
-Each key in `pending` is a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) to one
-placeholder in `arguments` (`/file`, or `/files/2` for an array item). An array argument can mix
-inline `data:` items and placeholders.
-
-```typescript
-interface FileMetadata {
-  name?: string;
-  /** "application/octet-stream" if unknown. */
-  mimeType: string;
-  /** Decoded size in bytes. */
-  size: number;
-  digest?: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
-}
-```
-
-Clients **SHOULD** include `digest`. Before sending the initial call, the host **MUST** obtain
-the user's approval, or apply operator policy when no user is present, for sending the file to
-this server and to storage the server designates.
+Before sending the initial call, the host **MUST** obtain the user's approval, or apply operator
+policy when no user is present, for sending the file to this server and to storage the server
+designates.
 
 Servers **SHOULD** run every check that does not need the bytes (destination authorization,
 quota, `accept` and `maxSize`, name collisions) and return a `CallToolResult` with
 `isError: true` if one fails. Servers **MUST** treat the metadata as client-asserted and re-check
-size and type once the bytes arrive.
+size, digest, and type once the bytes arrive.
 
 #### Upload required
 
-If the server accepts the files, it returns a result with `resultType: "upload_required"`, an
-extension-defined result type as the
-[base protocol](https://modelcontextprotocol.io/specification/draft/basic/index#resulttype)
-permits. This extension reserves the value `"upload_required"`.
+If the server accepts the files, it returns an `InputRequiredResult` with one upload input
+request under `inputRequests.uploads`. The method below is proposed by this extension; using it
+requires a core MRTR extension point because the current input-request union is closed.
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "resultType": "upload_required",
-    "uploads": {
-      "/file": {
-        "uri": "mcp-file:01JD3V7K2M",
-        "url": "https://upload.example.com/u/01JD3V7K2M?sig=...",
-        "headers": {
-          "Content-Type": "application/pdf",
-          "x-amz-checksum-sha256": "uU0nuZNNPgilLlLX2n2r+sSE7+N6U4D6ZVe+/rYh2sU="
-        },
-        "credentials": "omit"
+    "resultType": "input_required",
+    "inputRequests": {
+      "uploads": {
+        "method": "io.modelcontextprotocol/files/upload",
+        "params": {
+          "files": [{
+            "fileId": "file-1",
+            "url": "https://upload.example.com/u/01JD3V7K2M?sig=...",
+            "headers": {
+              "Content-Type": "application/pdf",
+              "x-amz-checksum-sha256": "uU0nuZNNPgilLlLX2n2r+sSE7+N6U4D6ZVe+/rYh2sU="
+            },
+            "credentials": "omit"
+          }]
+        }
       }
     },
     "requestState": "..."
@@ -251,16 +233,14 @@ permits. This extension reserves the value `"upload_required"`.
 ```
 
 ```typescript
-interface UploadRequiredResult extends Result {
-  resultType: "upload_required";
-  /** One entry per pending pointer. */
-  uploads: { [pointer: string]: UploadTarget };
-  requestState: string;
+interface UploadInputRequest {
+  method: "io.modelcontextprotocol/files/upload";
+  params: { files: UploadTarget[] };
 }
 
 interface UploadTarget {
-  /** The file URI the client places in the argument on the retry. */
-  uri: string;
+  /** The corresponding FileInput.id in the original arguments. */
+  fileId: string;
   /** Absolute https URL. The client sends the bytes with PUT. */
   url: string;
   /** Headers the client sends with the PUT. */
@@ -273,16 +253,16 @@ interface UploadTarget {
 }
 ```
 
-Servers **MUST** return `upload_required` only on `tools/call` and only to a request that
-declared the extension. A server using the
+Servers **MUST** return an upload input request only on `tools/call` and only to a request that
+declared the extension. Each `fileId` **MUST** match one file argument without `data`, and each
+file **MUST** have at most one outstanding target in the current round. A server using the
 [Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview) **MUST** return
-`upload_required` before creating a task.
+the upload input request before creating a task.
 
-Servers **MUST** bind the issued file URIs, the tool name, and the other arguments into
-`requestState`, which follows the
+Servers **MUST** bind the authenticated principal, tool name, all arguments, and the current
+target for each file to `requestState`, which follows the
 [MRTR server rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#server-requirements-basic-workflow).
-When computing the request digest that MRTR recommends, servers **MUST** exclude the values at
-the pointers bound in `requestState`. Clients handle `requestState` as the
+Clients handle `requestState` as the
 [MRTR client rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#client-requirements-basic-workflow)
 require for `InputRequiredResult`.
 
@@ -294,24 +274,26 @@ uploads with no retry.
 #### Transfer
 
 For each `UploadTarget` the client checks the target against [Upload targets](#upload-targets),
-sends one PUT to `url` with `headers` and the file bytes as the body, and treats a `2xx`
+sends a PUT to `url` with `headers` and the file bytes as the body, and treats a `2xx`
 response as success. Clients **MUST NOT** send more bytes than the declared `size`, and
-**SHOULD** bound the number of times they repeat an upload for one call.
+**MUST** limit retryable transfer failures to three total HTTP attempts per file per logical call.
+Clients **MUST** stop sooner if a failure is permanent or retrying is unsafe.
 
 The component that holds the bytes performs the transfer. A gateway that holds the credential
 but not the bytes can pass `omit` targets to the host, or rewrite an `include` target's `url` to
 a relay at its own origin and proxy it.
 
 Clients **MUST** complete the upload and retry without returning control to the model. Servers
-**SHOULD NOT** echo upload URLs or issued file URIs in the `CallToolResult`.
+**SHOULD NOT** echo upload URLs in the `CallToolResult`.
 
 Servers that issue `omit` targets to browser clients **SHOULD** configure the storage to answer
 the CORS preflight for the listed headers.
 
 #### Retry
 
-The client retries `tools/call` with the same tool name and arguments, each placeholder replaced
-by its file URI, and `requestState` echoed:
+The client retries `tools/call` with a new JSON-RPC ID, the same tool name and exact arguments,
+the echoed `requestState`, and one outcome for each requested file under
+`inputResponses.uploads`:
 
 ```json
 {
@@ -320,41 +302,50 @@ by its file URI, and `requestState` echoed:
   "method": "tools/call",
   "params": {
     "name": "save_to_folder",
-    "arguments": { "folderId": "fld_8c1a", "file": "mcp-file:01JD3V7K2M" },
+    "arguments": {
+      "folderId": "fld_8c1a",
+      "file": {
+        "id": "file-1",
+        "name": "Q3 report.pdf",
+        "mimeType": "application/pdf",
+        "size": 41204133,
+        "digest": {
+          "algorithm": "sha-256",
+          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
+        }
+      }
+    },
     "requestState": "...",
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientCapabilities": {
-        "extensions": { "io.modelcontextprotocol/files": {} }
+    "inputResponses": {
+      "uploads": {
+        "resultType": "complete",
+        "files": [{ "fileId": "file-1", "status": "completed" }]
       }
     }
   }
 }
 ```
 
-If an upload failed, the client leaves the placeholder in that argument and sends that file's
-entry in `pending` again.
+`resultType: "complete"` means the upload input request was answered; each file's `status` is
+`completed` if the client observed a successful transfer, or `failed` if it did not. A failed
+file ends this logical call. Clients **MUST NOT** include upload URLs or credentials in the response.
 
 On the retry the server:
 
 1. Verifies `requestState` and returns JSON-RPC error `-32602` if verification fails.
-2. Rejects the call if the tool name differs from the one bound in `requestState`. If the
-   non-file arguments differ, the server either rejects the call or re-runs every metadata check
-   on the new arguments.
-3. If any placeholder remains, returns a new `upload_required` covering only the pending
-   pointers, or a `CallToolResult` with `isError: true`. Servers **MUST NOT** run the tool while
-   a placeholder remains.
+2. Rejects the call if the tool name or any argument differs from the values bound in `requestState`.
+3. Rejects duplicate or unknown file IDs and unknown statuses. If any file has status `failed`,
+   returns a `CallToolResult` with `isError: true` without running the tool. A missing outcome is
+   unresolved; the server follows MRTR error handling and **MUST NOT** run the tool.
 4. Confirms with the storage backend that each file's bytes arrived (for example with a HEAD
-   request or a session status query), verifies `digest` where the backend can do so without
-   reading the bytes back, and re-checks size and type. Servers **MUST NOT** run the tool with a
-   file whose bytes they have not confirmed.
+   request or a session status query), verifies `digest`, and re-checks size and type. Servers
+   **MUST NOT** run the tool with a file whose bytes they have not confirmed.
 5. Performs any finalize step the backend needs, runs the tool, and returns its result.
 
-A file URI is valid only in a retry carrying a `requestState` that binds it. A server that
-answers a retry with `upload_required` or `input_required` **MUST** bind every file URI it has
-not consumed into the new `requestState`. A file URI is consumed when the server starts running
-the tool, and servers **MUST** reject a consumed file URI. Failures before that point do not
-consume it.
+The echoed state and `fileId` identify the current target. A replacement target requires a new
+state, and the server **MUST** prevent the old target from satisfying the new round. Servers
+**MUST NOT** accept stale state, use the same target for a different call, or execute a call
+twice on a repeated continuation.
 
 ### Upload targets
 
@@ -380,24 +371,23 @@ On stdio there is no canonical URI, so only `omit` targets apply.
 
 ## Rationale
 
-### Why an extension result type
+### Why an upload input request
 
 SEP-2631 negotiated uploads in a separate `files/authorizeUpload` call before `tools/call`. The
 server had to issue a regional upload URL before it saw the arguments, so it could not check the
 destination or quota first, and the two calls had no protocol-level link. Returning the upload target from `tools/call` lets the server see the full call first, and `requestState`
 carries the binding so any instance can serve the retry.
 
-An earlier version of this draft carried the target as a new `files/upload` entry in an
-`InputRequiredResult`. The MRTR rules and the schema allow only elicitation, sampling, and roots
-requests there, so that design needed a change to the specification. The base protocol lets
-extensions add result types, and the Tasks extension does so. A server then cannot ask for an upload and an elicitation in the same round trip.
+An upload input request can share the MRTR envelope with other inputs, but the current MRTR
+rules and schema allow only elicitation, sampling, and roots requests. This proposal therefore
+requires a change to the specification before clients and servers can interoperate.
 
-### Why a placeholder and `_meta`
+### Why a structured file argument
 
 SDKs and gateways can validate `arguments` against `inputSchema` before a handler runs, so the
-initial call cannot omit a required file argument. A placeholder passes that validation and
-marks the argument. The metadata goes in request `_meta` under the extension's key because the
-argument's schema is a URI string and cannot hold an object.
+initial call cannot omit a required file argument. A structured value satisfies that schema and
+keeps the file's metadata together, without a parallel request `_meta` map or a placeholder URI.
+Omitting `data` distinguishes out-of-band upload from inline transfer.
 
 ### Why `omit` and `include`
 
@@ -420,19 +410,17 @@ support, and this pair is a starting point.
 ## Backward Compatibility
 
 The extension is additive and off by default. A client that does not declare it never receives
-`upload_required`. A server that does not advertise it receives `data:` URIs up to its declared
-`maxSize`. Tools that take base64 or URL strings today keep working.
+an upload input request. Tools that take base64 or URL strings today keep working.
 
-SDKs that validate `tools/call` results against `CallToolResult | InputRequiredResult` need a
-hook for extension result types before they can carry `upload_required`.
+SDKs need an MRTR extension point before they can carry the proposed upload input request.
 
 ## Security Implications
 
 [Upload targets](#upload-targets) covers requests the server directs the client to make.
 A client that relaxes those rules lets a server use it for server-side request forgery and can leak the user's credential to other resources.
 
-Binding the tool name, arguments, and file URIs in `requestState`, and consuming each file URI
-once, prevents a client from uploading under one call's authorization and attaching the file to
+Binding the principal, tool name, arguments, and upload targets to `requestState` prevents a
+client from uploading under one call's authorization and attaching the file to
 another call or a different destination. A target that enforces the declared size and digest
 prevents anyone who sees an `omit` URL from replacing the bytes before the retry.
 
@@ -440,23 +428,22 @@ Servers **SHOULD** follow
 [OWASP ASVS 5.0 V5](https://github.com/OWASP/ASVS/blob/v5.0.0/5.0/en/0x14-V5-File-Handling.md)
 for the formats they accept.
 
-Clients and servers **MUST** redact upload URLs, upload headers, and `data:` values in logs,
+Clients and servers **MUST** redact upload URLs, upload headers, and inline `data` values in logs,
 traces, and error reports.
 
 ## Reference Implementation
 
-The reference implementation will include a TypeScript SDK branch with the `upload_required`
-result type and a client transfer helper, a reference server in front of an object store, and
+The reference implementation will include a TypeScript SDK branch with the upload input request
+and a client transfer helper, a reference server in front of an object store, and
 conformance scenarios for inline transfer, out-of-band transfer, rejection on metadata, a failed
 upload, and a digest mismatch.
 
 ## Open Questions
 
-1. **`upload_required` or an input request.** An input request inside `InputRequiredResult`
-   would let a server combine an upload with an elicitation in one round trip, at the cost of a
-   change to the specification. Is that worth it?
+1. **MRTR extensibility.** How should the specification enable extension-defined input requests?
 2. **Mandatory digest.** Requiring `digest` closes the byte-replacement gap for `omit` targets,
    but Web Crypto cannot hash a large file in chunks, so browsers have to read the whole file first.
+   Is that tradeoff acceptable?
 3. **Authorization methods.** The working group agreed to list every method it has to support,
    including storage that needs a credential separate from the MCP one and HTTP Message
    Signatures.
@@ -467,9 +454,7 @@ upload, and a digest mismatch.
    for them?
 7. **Resources.** Do resources fit this flow? Thomas Sarlandie took this as an action item on
    October 2.
-8. **The `mcp-file:` scheme.** Require it for issued file URIs, or leave the scheme to the
-   server under the opacity rules.
-9. **Multipart and POST.** Some storage APIs take only `multipart/form-data`. They can sit
+8. **Multipart and POST.** Some storage APIs take only `multipart/form-data`. They can sit
    behind a server proxy with `include`, or a later revision can add a `form` target.
 
 ## Future Work

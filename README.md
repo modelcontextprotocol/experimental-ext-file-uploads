@@ -11,11 +11,9 @@ stay out of model context and out of JSON-RPC messages. Maintained by the
 
 ## Overview
 
-A server marks file arguments in a tool's input schema. To send a file too large to inline, the
-client calls the tool with a placeholder in the file argument and the file's metadata in request
-`_meta`. The server rejects the call or returns an `upload_required` result with an upload
-target. The client uploads the bytes to that target and retries the call with the file URI the
-server issued. Small files go inline as `data:` URIs.
+A server marks file arguments in a tool's input schema. Each file argument contains its metadata
+and optional base64 data. When data is absent, the server rejects the call or requests an upload.
+The client uploads the bytes and retries with unchanged arguments and per-file outcomes.
 
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
 The reference implementation will live in this repository.
