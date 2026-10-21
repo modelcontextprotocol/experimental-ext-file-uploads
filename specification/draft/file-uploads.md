@@ -18,7 +18,7 @@ The client calls the tool with the file's metadata in the file argument and opti
 If data is absent, the server can reject the call on the metadata or request an upload to an HTTPS
 target. The client uploads the bytes and retries with the same arguments and a per-file outcome.
 
-This revision covers uploads. [Future Work](#future-work) lists downloads, chunked and resumable transfer, and file fields in elicitation forms.
+This revision covers uploads and proposes a shape for [downloads](#downloads). [Future Work](#future-work) lists chunked and resumable transfer and file fields in elicitation forms.
 
 ## Motivation
 
@@ -369,6 +369,63 @@ user credential to a request the server directed. These rules apply to every tar
 
 On stdio there is no canonical URI, so only `omit` targets apply.
 
+### Downloads
+
+> **Note:** The working group has not reviewed this section yet.
+
+A tool returns a file as a
+[`resource_link`](https://modelcontextprotocol.io/specification/draft/server/tools#resource-links)
+in `content`. The link describes the file with the base protocol's `name`, `mimeType`, and `size`.
+The extension adds a download target in the link's `_meta`, under the extension identifier:
+
+```json
+{
+  "type": "resource_link",
+  "uri": "export://exports/exp_01JD3V7K2M/q3-orders.csv",
+  "name": "q3-orders.csv",
+  "mimeType": "text/csv",
+  "size": 209715200,
+  "_meta": {
+    "io.modelcontextprotocol/files": {
+      "url": "https://download.example.com/d/01JD3V9P4Q?sig=...",
+      "credentials": "omit"
+    }
+  }
+}
+```
+
+```typescript
+interface DownloadTarget {
+  /** Absolute https URL. The client fetches the bytes with GET. */
+  url: string;
+  /** Headers the client sends with the GET. */
+  headers?: { [name: string]: string };
+  /** Same meaning as in UploadTarget. */
+  credentials: "omit" | "include";
+  /** SHA-256 over the whole file. */
+  digest?: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
+}
+```
+
+[Upload targets](#upload-targets) applies to download targets unchanged.
+
+Servers **MUST** add a download target only to the result of a request that declared the
+extension. The `uri` identifies the file and **MUST NOT** carry a credential. It can equal `url`
+when the URL holds no secret. Clients do not follow redirects, so servers resolve any backend
+redirect and return the final URL.
+
+The client sends a GET to `url` with `headers` and treats a `200` response as success. `size` and
+`digest` describe the bytes after any `Content-Encoding` is removed, and clients **MUST** check
+each one that is present. A target can expire and cannot be renewed, so a client that wants the file
+**SHOULD** fetch it before returning control to the model. Calling the tool again runs it again,
+so clients **MUST NOT** do that automatically.
+
+Hosts **MUST** remove the download target before the result reaches model context. A gateway
+**MAY** replace a target with a relay at its own origin. The gateway then checks the original
+target, fetches the bytes from it, and serves them only to the caller.
+
+Small files can still travel as an embedded resource, as they do in the base protocol.
+
 ## Rationale
 
 ### Why an upload input request
@@ -397,6 +454,15 @@ want the data plane authorized with the same token as the control plane. A per-t
 covers both. Tying `include` to the server's canonical URI keeps the token within the resource
 it was issued for. The group has not finished listing the authorization methods it needs to
 support, and this pair is a starting point.
+
+### Why a `resource_link` for downloads
+
+Upload and download share what the server hands the client to move bytes: the same `url`, `headers`,
+and `credentials`, under the same target rules. They differ in where the file's description travels,
+because MCP types tool arguments with `inputSchema` and returns results as content blocks, and
+`resource_link` is already the block for a file. A client or gateway can find a returned file by
+scanning `content`, without the tool's schema. A download needs no second call, because the server
+has run the tool by the time it names the file.
 
 ### Prior art
 
@@ -428,7 +494,10 @@ Servers **SHOULD** follow
 [OWASP ASVS 5.0 V5](https://github.com/OWASP/ASVS/blob/v5.0.0/5.0/en/0x14-V5-File-Handling.md)
 for the formats they accept.
 
-Clients and servers **MUST** redact upload URLs, upload headers, and inline `data` values in logs,
+A URL that authorizes itself is a secret for as long as it works, so servers choose its lifetime
+with that in mind.
+
+Clients and servers **MUST** redact target URLs, target headers, and inline `data` values in logs,
 traces, and error reports.
 
 ## Reference Implementation
@@ -459,7 +528,6 @@ upload, and a digest mismatch.
 
 ## Future Work
 
-- **Downloads.** A download target that mirrors `UploadTarget`, with the same rules.
 - **Chunked and resumable transfer**, for backends with per-request size limits and for
   interrupted transfers, once a standard settles.
 - **Elicitation forms.** Out-of-band upload for `x-mcp-file` fields in `elicitation/create`.
