@@ -279,9 +279,9 @@ response as success. Clients **MUST NOT** send more bytes than the declared `siz
 **MUST** limit retryable transfer failures to three total HTTP attempts per file per logical call.
 Clients **MUST** stop sooner if a failure is permanent or retrying is unsafe.
 
-The component that holds the bytes performs the transfer. A gateway that holds the credential
-but not the bytes can pass `omit` targets to the host, or rewrite an `include` target's `url` to
-a relay at its own origin and proxy it.
+The component that holds the bytes performs the transfer. A gateway **MAY** replace a target's
+`url`, `headers`, and `credentials` with a relay at its own origin. The gateway then checks the
+original target against [Upload targets](#upload-targets) and forwards the bytes to it.
 
 Clients **MUST** complete the upload and retry without returning control to the model. Servers
 **SHOULD NOT** echo upload URLs in the `CallToolResult`.
