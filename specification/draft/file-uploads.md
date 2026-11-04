@@ -241,12 +241,14 @@ interface UploadInputRequest {
 interface UploadTarget {
   /** The corresponding FileInput.id in the original arguments. */
   fileId: string;
-  /** Absolute https URL. The client sends the bytes with PUT. */
-  url: string;
+  /** Absolute https URL. The client sends the bytes with PUT. Exactly one of url and path is present. */
+  url?: string;
+  /** Path under the address the client uses for MCP. The client sends the bytes with PUT. */
+  path?: string;
   /** Headers the client sends with the PUT. */
   headers?: { [name: string]: string };
   /**
-   * "omit": the URL authorizes itself. "include": the client attaches the credential it
+   * "omit": the target authorizes itself. "include": the client attaches the credential it
    * presents to the MCP server. See Upload targets.
    */
   credentials: "omit" | "include";
@@ -274,14 +276,16 @@ uploads with no retry.
 #### Transfer
 
 For each `UploadTarget` the client checks the target against [Upload targets](#upload-targets),
-sends a PUT to `url` with `headers` and the file bytes as the body, and treats a `2xx`
+sends a PUT to the target's `url` or resolved `path` with `headers` and the file bytes as the body, and treats a `2xx`
 response as success. Clients **MUST NOT** send more bytes than the declared `size`, and
 **MUST** limit retryable transfer failures to three total HTTP attempts per file per logical call.
 Clients **MUST** stop sooner if a failure is permanent or retrying is unsafe.
 
 The component that holds the bytes performs the transfer. A gateway **MAY** replace a target's
-`url`, `headers`, and `credentials` with a relay at its own origin. The gateway then checks the
-original target against [Upload targets](#upload-targets) and forwards the bytes to it.
+`url` or `path`, `headers`, and `credentials` with a relay at its own origin. The gateway then checks the
+original target against [Upload targets](#upload-targets) and forwards the bytes to it, resolving
+a `path` against the address it uses for the server. A gateway that passes a `path` target through
+unchanged **MUST** route that path to the server.
 
 Clients **MUST** complete the upload and retry without returning control to the model. Servers
 **SHOULD NOT** echo upload URLs in the `CallToolResult`.
@@ -352,22 +356,31 @@ twice on a repeated continuation.
 The server chooses the upload target, and with `credentials: "include"` the client attaches a
 user credential to a request the server directed. These rules apply to every target:
 
-1. Clients **MUST** reject a `url` that is not an absolute `https` URL.
+1. Clients **MUST** reject a target that does not have exactly one of `url` and `path`, and a
+   `url` that is not an absolute `https` URL.
 2. Clients **MUST NOT** connect to an address that the
    [IANA special-purpose registries](https://www.rfc-editor.org/rfc/rfc6890) mark as not
    globally reachable, checked on the address they connect to, unless an operator allowlist
-   permits it. Clients **MUST NOT** follow redirects.
+   permits it or the target is a `path`, which uses the address the client already connects to.
+   Clients **MUST NOT** follow redirects.
 3. Clients **MUST** reject a target whose `headers` include `Authorization`, `Cookie`, a
    [forbidden request header](https://fetch.spec.whatwg.org/#forbidden-request-header), or a
    name or value that is not valid under [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#section-5).
-4. Clients **MUST** honor `credentials: "include"` only when `url` has the same origin as the MCP
+4. Clients **MUST** honor `credentials: "include"` only on a `path` target, or when `url` has the same origin as the MCP
    server's
    [canonical URI](https://modelcontextprotocol.io/specification/draft/basic/authorization/index#canonical-server-uri)
    and a path equal to the canonical path or starting with it followed by `/`. In a gateway
    deployment this is the canonical URI of the server whose credential is attached. Otherwise
    the client **MUST** treat the target as `"omit"` or refuse it.
+5. Clients **MUST** reject a `path` that does not start with exactly one `/`, or that contains a
+   `.` or `..` segment, a backslash, `?`, or `#`, including in percent-encoded form.
 
-On stdio there is no canonical URI, so only `omit` targets apply.
+A client resolves a `path` by adding it to the end of the path of the address it sends MCP
+requests to, without a doubled `/` and before any query string on that address. With the MCP
+address `https://gateway.example.com/mcp/abc`, the path `/uploads` resolves to
+`https://gateway.example.com/mcp/abc/uploads`.
+
+On stdio there is no canonical URI or MCP address, so only `url` targets with `omit` apply.
 
 ### Downloads
 
@@ -396,8 +409,10 @@ The extension adds a download target in the link's `_meta`, under the extension 
 
 ```typescript
 interface DownloadTarget {
-  /** Absolute https URL. The client fetches the bytes with GET. */
-  url: string;
+  /** Absolute https URL. The client fetches the bytes with GET. Exactly one of url and path is present. */
+  url?: string;
+  /** Path under the address the client uses for MCP. The client fetches the bytes with GET. */
+  path?: string;
   /** Headers the client sends with the GET. */
   headers?: { [name: string]: string };
   /** Same meaning as in UploadTarget. */
@@ -414,7 +429,7 @@ extension. The `uri` identifies the file and **MUST NOT** carry a credential. It
 when the URL holds no secret. Clients do not follow redirects, so servers resolve any backend
 redirect and return the final URL.
 
-The client sends a GET to `url` with `headers` and treats a `200` response as success. `size` and
+The client sends a GET to the target's `url` or resolved `path` with `headers` and treats a `200` response as success. `size` and
 `digest` describe the bytes after any `Content-Encoding` is removed, and clients **MUST** check
 each one that is present. A target can expire and cannot be renewed, so a client that wants the file
 **SHOULD** fetch it before returning control to the model. Calling the tool again runs it again,
@@ -455,9 +470,19 @@ covers both. Tying `include` to the server's canonical URI keeps the token withi
 it was issued for. The group has not finished listing the authorization methods it needs to
 support, and this pair is a starting point.
 
+### Why a `path` target
+
+A gateway can replace a target with a relay at its own origin, but one absolute URL assumes every
+client reaches the gateway the same way. A client in a sandbox or behind a proxy can reach it
+through another address and may not be able to reach the public host. Because that host's origin
+differs from the one the client called, rule 4 of [Upload targets](#upload-targets) also makes the
+client drop its credential or refuse the target. With `path`, each client transfers through the
+address it already uses, so the bytes take the same route as its MCP calls. `url` stays for
+anywhere else, such as third-party storage.
+
 ### Why a `resource_link` for downloads
 
-Upload and download share what the server hands the client to move bytes: the same `url`, `headers`,
+Upload and download share what the server hands the client to move bytes: the same `url` or `path`, `headers`,
 and `credentials`, under the same target rules. They differ in where the file's description travels,
 because MCP types tool arguments with `inputSchema` and returns results as content blocks, and
 `resource_link` is already the block for a file. A client or gateway can find a returned file by
@@ -484,6 +509,7 @@ SDKs need an MRTR extension point before they can carry the proposed upload inpu
 
 [Upload targets](#upload-targets) covers requests the server directs the client to make.
 A client that relaxes those rules lets a server use it for server-side request forgery and can leak the user's credential to other resources.
+The `path` rules keep a target under the address the client already uses for MCP.
 
 Binding the principal, tool name, arguments, and upload targets to `requestState` prevents a
 client from uploading under one call's authorization and attaching the file to
