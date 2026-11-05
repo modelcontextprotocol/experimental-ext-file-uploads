@@ -1,6 +1,6 @@
 # File Uploads Extension
 
-- **Status**: Experimental draft, not yet proposed as a SEP
+- **Status**: Draft
 - **Extension Identifier**: `io.modelcontextprotocol/files` (provisional)
 - **Working Group**: [File Uploads](https://modelcontextprotocol.io/community/working-groups/file-uploads)
 - **Editors**: Den Delimarsky (@localden)
@@ -15,10 +15,14 @@ implementation exists. Anything here can change before then, including the exten
 This extension defines how MCP clients transfer files to and from tools over HTTPS. Files
 transferred out of band do not enter model context or JSON-RPC messages.
 
-To send a file, the client calls the tool with the file's metadata. The server rejects the call
-based on the metadata or returns an upload target. The client then uploads the bytes and retries the
-call. Clients can instead send small files inline. A tool returns a file by listing a download
-target in its result.
+A client has two options for uploading a file:
+
+- **Inline**: The client sends a small file in the tool call.
+- **Out of band**: The client calls the tool with the file's metadata. The server either returns an
+  upload target or rejects the call based on the metadata. If the server returns a target, the client
+  uploads the bytes and retries the call.
+
+To download a file, the client fetches it from a download target that the tool lists in its result.
 
 ## Specification
 
