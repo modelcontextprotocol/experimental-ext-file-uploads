@@ -8,8 +8,7 @@
   and issues in this repository
 
 The working group plans to submit this document as an Extensions Track SEP once a reference
-implementation exists. All content, including the extension identifier, is subject to change before
-submission.
+implementation exists. Anything here can change before then, including the extension identifier.
 
 ## Abstract
 
@@ -35,8 +34,8 @@ This revision applies to tools. Resource behavior is unchanged from the base pro
 - **Target**: The URL or path to which a client sends file bytes, or from which it fetches them.
 - **Logical call**: An initial `tools/call` request and its retries.
 
-Requirements on clients in [Transfer](#transfer), [Downloads](#downloads), and [Targets](#targets)
-bind the component that performs the transfer.
+In [Transfer](#transfer), [Downloads](#downloads), and [Targets](#targets), client means the
+component that performs the transfer.
 
 ### Capabilities
 
@@ -213,8 +212,8 @@ Hosts:
 The host rules above apply to any file the host can read, including a file an agent created.
 
 A tool whose text argument can refer to files, such as Markdown with image links, **SHOULD** accept
-a separate array of file arguments and document the relationship in its description. How a result is
-presented to the model is host behavior and outside the scope of this extension.
+a separate array of file arguments and document the relationship in its description. This extension
+does not define how a host presents a result to the model.
 
 ### Uploads
 
@@ -264,9 +263,9 @@ conditional writes accepts the revision or condition as a tool argument.
 #### Upload Request
 
 If the server accepts the files, it returns an `InputRequiredResult` with an upload input request
-under `inputRequests.uploads`. The core MRTR input-request and input-response unions are closed.
-Using this method requires a core MRTR extension point. The fixed `uploads` key differs from core
-MRTR, in which `inputRequests` keys are server-assigned.
+under `inputRequests.uploads`. This method needs a core MRTR extension point, because the
+input-request and input-response unions are closed. The fixed `uploads` key also differs from core
+MRTR, where keys are server-assigned.
 
 ```json
 {
@@ -356,7 +355,7 @@ Clients:
 
 - **MUST NOT** send more bytes than the declared `size`.
 - **SHOULD NOT** start a transfer after `expiresAt`, and **MUST** report that file as `failed` if
-  they do not start it. The target determines whether to accept a transfer.
+  they do not start it. The target decides whether to accept a transfer.
 - **MUST** limit transfer attempts to three per file per logical call. Each request sent to a target
   is an attempt, including a request that answers a repeated upload input request.
 - **MUST** report the file as `failed` on the retry after reaching that limit, and **MUST** stop
@@ -421,7 +420,7 @@ and **MUST** respond as [Errors](#errors) specifies when a step fails:
 1. Verify `requestState`.
 2. Check the tool name and arguments against the values bound in `requestState`.
 3. Claim `requestState` as specified in [Repeated Retries](#repeated-retries). If it is already
-   claimed, proceed as that section specifies.
+   claimed, follow that section.
 4. Check each `fileId` and status. If any file has status `failed`, stop without running the tool.
    If an outcome is missing, follow [MRTR error
    handling](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#error-handling)
@@ -447,8 +446,8 @@ for their outcome again. Servers **MUST NOT** use a target for a different call.
 A client can repeat a retry if it does not receive the response.
 
 Servers **SHOULD** claim a `requestState` atomically before running the tool, using storage every
-instance shares, and **MUST** do so if running the tool twice is unsafe. A claimed `requestState` is
-considered processed, including while the tool is running.
+instance shares, and **MUST** do so if running the tool twice is unsafe. A claimed `requestState`
+counts as processed, even while the tool is running.
 
 A server that receives a claimed `requestState` **MUST NOT** run the tool again. It **MUST** return
 the original result to the same principal, or the `already_processed` error. If the earlier retry
@@ -469,7 +468,7 @@ Servers are responsible for the lifetime and cleanup of staged bytes. Servers:
   or their target is replaced, whichever comes first.
 - **MUST NOT** expose a staged file as finished until they confirm it on the retry.
 - **SHOULD** delete staged bytes when a call fails or a target is replaced, and **SHOULD** use
-  storage-side expiry for staged bytes for which no retry arrives.
+  storage-side expiry for staged bytes with no retry.
 - **MUST** allow any instance that receives the retry to confirm the staged bytes.
 - **SHOULD** prevent further writes through a target before verifying its bytes, and **SHOULD**
   finalize the bytes they verified.
@@ -482,8 +481,7 @@ arrives before the `requestState` expires, the server **MUST** remove the file.
 
 ### Downloads
 
-> **Note**: The working group discussed an earlier form of this section on October 30, 2026, and
-> has not reviewed this form yet.
+> **Note**: The working group has not reviewed this section yet.
 
 A tool returns files by listing them in the `_meta` of its `CallToolResult`, under the extension
 identifier, with one entry per file. The server **MUST** also describe the result in `content`:
@@ -543,8 +541,8 @@ Servers:
 
 - **MUST** add a download target only to the result of a call whose `tools/call` request declared
   `download`, however that result is delivered.
-- **MUST NOT** list a target until the file can be fetched. How a tool waits for a file to exist is
-  outside the scope of this extension.
+- **MUST NOT** list a target until the file can be fetched. This extension does not define how a
+  tool waits for a file to exist.
 - **SHOULD** include `size` when they know it.
 
 The client sends a `GET` to the target's `url` or resolved `path` with `headers`. A `200` response,
@@ -560,8 +558,8 @@ Clients:
 - **MUST** abort once the decoded bytes exceed `size`, and **SHOULD** apply their own limit when
   `size` is absent.
 - **SHOULD NOT** start a download after `expiresAt`.
-- **SHOULD** fetch any file they intend to retrieve before returning control to the model, if user
-  or operator policy permits. A target cannot be renewed.
+- **SHOULD** fetch a file they want before returning control to the model, if user or operator
+  policy permits. A target cannot be renewed.
 - **MUST NOT** repeat the call automatically. A repeated call runs the tool again.
 
 Hosts **MUST NOT** place download targets in model context.
@@ -570,8 +568,7 @@ Servers can return small files as embedded resources, as defined in the base pro
 
 ### Targets
 
-The rules in this section apply to every upload and download target. With `credentials: "include"`,
-the client attaches a user credential to a server-directed request.
+These rules apply to every upload and download target.
 
 Clients **MUST** reject a target if:
 
@@ -652,8 +649,8 @@ and **MUST** attach its own credential for the server when the target has `crede
 ### Errors
 
 Servers **MUST** respond to the following conditions as shown. The `requestState`, `fileId`, status,
-and bytes conditions apply to a retry that answers an upload input request. `isError: true` denotes
-a `CallToolResult` with `isError` set to `true`. `-32021` is
+and bytes conditions apply to a retry that answers an upload input request. `isError: true` means a
+`CallToolResult` with `isError` set to `true`. `-32021` is
 [`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/draft/schema#missingrequiredclientcapabilityerror).
 
 | Condition                                                                            | Response                                                                                             |
@@ -703,20 +700,19 @@ does not implement it. Such a gateway cannot meet the rules in [Targets](#target
 A malicious server can specify any public URL as an `omit` target and receive the file at that URL.
 `POST` reaches more existing endpoints than `PUT`. The host approval required before the initial
 call mitigates this risk and applies to agent-created files. A compromised agent can write sensitive
-data to a file and attempt to send it.
+data to a file and try to send it.
 
 ### Binding
 
 Binding the principal, tool name, arguments, and upload targets to `requestState` prevents a client
 from uploading under one call's authorization and attaching the file to another call or destination.
-The required digest enables the server to detect bytes replaced through an `omit` URL before it uses
-them.
+The required digest lets the server detect bytes replaced through an `omit` URL before it uses them.
 
 ### Writable Targets
 
-A target that remains writable after verification allows any holder of the target to replace the
-file. Pre-signed URLs often cannot be revoked. Servers that use them rely on short lifetimes or
-finalize a copy of the verified bytes.
+A target that remains writable after verification lets anyone holding it replace the file.
+Pre-signed URLs often cannot be revoked. Servers that use them rely on short lifetimes or finalize a
+copy of the verified bytes.
 
 ### Secret URLs
 
@@ -743,17 +739,16 @@ mismatch, a repeated retry, and a download.
 ## Open Questions
 
 1. **MRTR extensibility.** How should the specification enable extension-defined input requests?
-   Repeated retries and a dedicated error code are candidates for the same change.
+   Repeated retries and a dedicated error code may belong in the same change.
 2. **Finalize.** Some backends return a commit handle in the transfer's HTTP response, such as an
    ETag or block ID, and the retry has no field for it. Owners of backends with an explicit commit
-   step are asked to confirm whether finalizing on the retry is sufficient. An optional per-file
-   field in `UploadInputResponse` can be added if required.
+   step are asked to confirm whether finalizing on the retry works. An optional per-file field in
+   `UploadInputResponse` can be added if needed.
 3. **Tools behind an executor.** Gateways that expose a single generic tool hide the inner tool's
    schema, including `x-mcp-file`. The executor could declare its own file argument and map it to
-   the inner call. This question requires resolution before the extension leaves the experimental
+   the inner call. The group needs to answer this before the extension leaves the experimental
    phase.
-4. **Resources.** Should a later revision apply this flow to resources? Thomas Sarlandie took this
-   as an action item on October 2.
+4. **Resources.** Should a later revision apply this flow to resources?
 5. **Multipart.** Some storage APIs accept only `multipart/form-data`. A server can proxy such an
    API with an `include` target, or a later revision can add a `form` target.
 
@@ -764,14 +759,13 @@ mismatch, a repeated retry, and a download.
 - **Elicitation forms.** Out-of-band upload for `x-mcp-file` fields in `elicitation/create`.
 - **More authorization methods**, including storage that needs a credential separate from the MCP
   one, and HTTP Message Signatures.
-- **Promotion to the specification**, after the group has validated the extension in use, per its
-  October 2 decision.
+- **Promotion to the specification**, after the group has validated the extension in use.
 
 ## Acknowledgments
 
 This draft builds on
-[SEP-2356](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356) by Olivier Chafik
-and [SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631) by Casey
-Chow, on the working group's October 2, 2026 meeting with Wil St. Charles, Kurtis Van Gent, Thomas
-Sarlandie, and Kryspin Ziemski, on its October 30, 2026 meeting, and on review from the group and
-implementers. Thomas Sarlandie proposed modeling the upload as a multi round-trip request.
+[SEP-2356](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356) and
+[SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631), and on
+collaboration in the
+[File Uploads Working Group](https://modelcontextprotocol.io/community/working-groups/file-uploads)
+and review from implementers.
