@@ -36,7 +36,8 @@ This revision applies to tools. Resource behavior is unchanged from the base pro
 - **MCP address**: The URL a client sends MCP requests to. This URL can vary per hop and can differ
   from the server's canonical URI.
 - **Target**: The URL or path to which a client sends file bytes, or from which it fetches them.
-- **Logical call**: An initial `tools/call` request and its retries.
+- **Logical call**: An initial `tools/call` request and its retries, on one hop. A gateway's call to
+  a server is a separate logical call from its caller's call to the gateway.
 
 In [Transfer](#transfer), [Downloads](#downloads), and [Targets](#targets), client means the
 component that performs the transfer.
@@ -61,7 +62,6 @@ Servers advertise the extension in the `server/discover` response:
     "extensions": {
       "io.modelcontextprotocol/files": {
         "upload": {},
-        "download": {},
         "maxInlineBytes": 1048576
       }
     }
@@ -72,13 +72,14 @@ Servers advertise the extension in the `server/discover` response:
 The settings object has the following fields:
 
 - `upload` _(optional)_: The sender supports out-of-band uploads.
-- `download` _(optional)_: The sender supports out-of-band downloads.
+- `download` _(optional, clients only)_: The client accepts download targets.
 - `maxInlineBytes` _(optional, servers only)_: The largest total decoded size of inline `data`
   values the server accepts in one request. If `0` or absent, the server does not accept inline
   transfer.
 
-If `upload` or `download` is absent, the sender does not support that direction. Receivers **MUST**
-ignore fields they do not recognize in these settings.
+If `upload` is absent, the sender does not support out-of-band uploads. If a client omits
+`download`, the server does not send it download targets. Receivers **MUST** ignore fields they do
+not recognize in these settings.
 
 Clients:
 
@@ -153,8 +154,6 @@ interface FileInput {
   mimeType: string;
   /** Non-negative integer; decoded size in bytes. */
   size: number;
-  /** SHA-256 over the original bytes. */
-  digest: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
   /**
    * RFC 4648 base64-encoded file bytes. If absent and size is greater than 0, the client requests
    * an out-of-band upload.
@@ -180,17 +179,9 @@ This can be represented in a server's schema as follows:
           "name": { "type": "string" },
           "mimeType": { "type": "string" },
           "size": { "type": "integer", "minimum": 0 },
-          "digest": {
-            "type": "object",
-            "properties": {
-              "algorithm": { "const": "sha-256" },
-              "value": { "type": "string" }
-            },
-            "required": ["algorithm", "value"]
-          },
           "data": { "type": "string" }
         },
-        "required": ["id", "mimeType", "size", "digest"]
+        "required": ["id", "mimeType", "size"]
       }
     },
     "required": ["folderId", "file"]
@@ -199,10 +190,10 @@ This can be represented in a server's schema as follows:
 ```
 
 Clients **MUST** make each `id` unique within the call. Servers **MUST** validate the decoded size
-and digest before using the bytes.
+before using the bytes.
 
 A file with `size` 0 has no bytes to transfer. Clients **MUST** omit `data` for it. Servers **MUST**
-treat it as an empty file, **MUST** check its `digest`, and **MUST NOT** issue a target for it.
+treat it as an empty file, and **MUST NOT** issue a target for it.
 Servers **SHOULD** treat an empty `data` string the same way. A tool can still reject an empty file.
 
 Clients that do not support this extension ignore the keyword. Validators that reject unknown
@@ -246,11 +237,7 @@ include the required
         "id": "file-1",
         "name": "Q3 report.pdf",
         "mimeType": "application/pdf",
-        "size": 41204133,
-        "digest": {
-          "algorithm": "sha-256",
-          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
-        }
+        "size": 41204133
       }
     }
   }
@@ -262,8 +249,8 @@ to storage the server designates, or apply operator policy when no user is prese
 
 Servers **SHOULD** perform every check that does not require the bytes, such as destination
 authorization, quota, `accept`, and `maxSize`, and return a `CallToolResult` with `isError: true` if
-one fails. Servers **MUST** treat the metadata as client-asserted and re-check size, digest, and
-type once the bytes arrive.
+one fails. Servers **MUST** treat the metadata as client-asserted and re-check size and type once
+the bytes arrive.
 
 The tool determines whether an existing file with the same name is a conflict. A tool that supports
 conditional writes accepts the revision or condition as a tool argument.
@@ -289,10 +276,7 @@ MRTR, where keys are server-assigned.
             {
               "fileId": "file-1",
               "url": "https://upload.example.com/u/01JD3V7K2M?sig=...",
-              "headers": {
-                "Content-Type": "application/pdf",
-                "x-amz-checksum-sha256": "uU0nuZNNPgilLlLX2n2r+sSE7+N6U4D6ZVe+/rYh2sU="
-              },
+              "headers": { "Content-Type": "application/pdf" },
               "credentials": "omit",
               "expiresAt": "2026-11-04T18:30:00Z"
             }
@@ -368,13 +352,17 @@ Servers:
 - **MUST** return an upload input request only on `tools/call`, and only to a request that declared
   `upload`.
 - **MUST** make each `fileId` match one non-empty file argument without `data`.
-- **MUST NOT** give a file more than one outstanding target in a round.
+- **MUST** list every non-empty file argument without `data` in the upload input request, each
+  `fileId` once.
+- **MUST** record in `requestState` that an upload input request was issued, and carry that record
+  into every later `requestState` of the logical call.
+- **MUST NOT** return an upload input request on a retry whose `requestState` holds that record.
+- **MUST NOT** use a target for a different call.
 - **MUST** return the upload input request before creating a task, if they use the [Tasks
   extension](https://modelcontextprotocol.io/extensions/tasks/overview).
-- **MUST** bind the tool name, all arguments, each file's current target, and the authenticated
+- **MUST** bind the tool name, all arguments, each file's target, and the authenticated
   principal, if any, to `requestState`.
-- **MUST NOT** allow a target to remain valid after the latest `requestState` it was issued under
-  expires.
+- **MUST NOT** allow a target to remain valid after the `requestState` it was issued under expires.
 
 Servers **MUST** handle `requestState` as the [MRTR server
 rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#server-requirements-basic-workflow)
@@ -408,19 +396,24 @@ Clients:
 - **MUST** send `Content-Length`. With `form`, it includes the multipart framing, so it exceeds
   `size`.
 - **MUST NOT** send more file bytes than the declared `size`.
-- **SHOULD NOT** start a transfer after `expiresAt`, and **MUST** report that file as `failed` if
-  they do not start it. The target decides whether to accept a transfer.
-- **MUST** bound transfer attempts per file per logical call, and **MUST** answer at least one
-  repeated upload input request. Each request sent to a target is an attempt, including a request
-  that answers a repeated upload input request.
-- **MUST** report the file as `failed` on the retry after reaching that bound, and **MUST** stop
-  before it if a failure is permanent or a further attempt is unsafe.
+- **SHOULD NOT** start a transfer after `expiresAt`. The target decides whether to accept a
+  transfer.
+- **MAY** repeat a `PUT` to the same target after a failed attempt, and **MUST** bound attempts per
+  file. Each request sent to a target is an attempt.
+- **MUST** stop after reaching that bound, and **MUST** stop before it if a failure is permanent or
+  a further attempt is unsafe.
+- **MUST** treat the call as failed if they receive a second upload input request in the logical
+  call, and **MUST NOT** transfer to its targets or retry the call.
 - **MUST NOT** automatically resend a `POST` unless they know the target did not apply the request.
-  A transfer that answers a repeated upload input request is not a resend.
 - **MUST** treat a `401` or `403` from a target as a failed transfer, and **MUST NOT** start
   authorization discovery from it.
-- **MUST** complete the upload and retry without returning control to the model.
-- **SHOULD** send the retry with status `failed` if the user cancels.
+- **MUST** finish the upload flow without returning control to the model.
+
+Clients **MUST** send the retry only if every requested file received a `2xx` response. If a target
+is rejected, a transfer fails, or the user cancels, the client **MUST NOT** send the retry, and
+**SHOULD** stop any other transfer in the logical call. The tool has not run. A gateway that
+performs the transfer itself **MUST** return `isError: true` to its caller. A host **MUST** tell the
+user or model that the tool did not run, and **MUST NOT** claim that no bytes were stored.
 
 Servers **SHOULD NOT** echo upload URLs in the `CallToolResult`. Servers that issue `omit` targets
 to browser clients **SHOULD** configure the storage to allow the client's origin on the transfer
@@ -429,7 +422,7 @@ response, and on the preflight for any listed headers, because the client must r
 #### Retry
 
 When retrying, the client **MUST** send a new JSON-RPC `id`, the same tool name and exact arguments,
-the exact `requestState`, and one outcome per requested file under `inputResponses.uploads`:
+the exact `requestState`, and an empty object under `inputResponses.uploads`:
 
 ```json
 {
@@ -444,91 +437,77 @@ the exact `requestState`, and one outcome per requested file under `inputRespons
         "id": "file-1",
         "name": "Q3 report.pdf",
         "mimeType": "application/pdf",
-        "size": 41204133,
-        "digest": {
-          "algorithm": "sha-256",
-          "value": "uU0nuZNNPgilLlLX2n2r-sSE7-N6U4D6ZVe-_rYh2sU"
-        }
+        "size": 41204133
       }
     },
-    "inputResponses": {
-      "uploads": {
-        "files": [{ "fileId": "file-1", "status": "completed" }]
-      }
-    },
+    "inputResponses": { "uploads": {} },
     "requestState": "..."
   }
 }
 ```
 
 ```typescript
-interface UploadInputResponse {
-  files: { fileId: string; status: "completed" | "failed" }[];
-}
+/** Empty. Its presence states that every requested file received a `2xx` response. */
+interface UploadInputResponse {}
 ```
 
-`status` is `completed` if the client observed a successful transfer, and `failed` otherwise. A file
-with status `failed` ends the logical call. Clients **MUST NOT** include upload URLs or credentials
-in the response.
+The retry does not show that the bytes arrived. Clients **MUST NOT** include upload URLs or
+credentials in the response.
 
 On a retry that answers an upload input request, the server **MUST** perform these steps in order,
 and **MUST** respond as [Errors](#errors) specifies when a step fails:
 
-1. Verify `requestState`.
+1. Verify `requestState`. A consumed `requestState` fails verification.
 2. Check the tool name and arguments against the values bound in `requestState`.
-3. If the logical call is claimed, follow [Repeated Retries](#repeated-retries) and skip the
-   remaining steps.
-4. Check each `fileId` and status. If any file has status `failed`, stop without running the tool.
-   If an outcome is missing, follow [MRTR error
-   handling](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#error-handling)
-   and do not run the tool.
-5. Confirm with the storage backend that each requested file's bytes arrived, for example with a
-   `HEAD` request or a session status query. Verify `digest`, and re-check size and type. The server
-   **MUST NOT** run the tool with bytes it has not confirmed.
-6. If running the tool twice is unsafe, claim the logical call as specified in [Repeated
-   Retries](#repeated-retries). If another retry holds the claim, follow that section.
-7. Perform any finalize step the backend needs, run the tool, and return its result.
+3. Check that `inputResponses.uploads` is present.
+4. Confirm with the storage backend that the bytes of each file bound in `requestState` arrived, for
+   example with a `HEAD` request or a session status query. Re-check size and
+   type. The server **MUST NOT** run the tool with bytes it has not confirmed.
+5. If running the tool twice is unsafe, consume `requestState` as specified in [Repeated
+   Retries](#repeated-retries). If another retry consumed it first, respond as for step 1.
+6. Perform any finalize step the backend needs, run the tool, and return its result.
 
-If the bytes have not arrived at step 5, the server **MAY** return another `InputRequiredResult`
-with a new `requestState` and a new or reissued target. It is not required to wait for the bytes to
-become visible first. A repeated upload input request can require a full re-upload, including when
-the bytes arrived but the backend had not yet made them visible.
+If a file's bytes have not arrived at step 4, the server **MAY** wait for them. If they do not
+arrive, it **MUST NOT** run the tool.
 
-The echoed `requestState` and `fileId` identify the current target. A new round requires a new
-`requestState`, and a server **MAY** reissue the same target under it. If the server issues a
-different target, it **MUST** prevent the old target from satisfying the new round. A server that
-issues a later round **MUST** bind confirmed files to the new `requestState`, and **MUST NOT** ask
-for their outcome again. Servers **MUST NOT** use a target for a different call.
+This extension narrows two [MRTR
+rules](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr) for upload input
+requests only. A server does not prompt again, and does not re-request a missing `uploads` response.
+Other input requests are unaffected.
+
+A server that returns a later `InputRequiredResult` in the logical call **MUST** bind each file's
+confirmation to its `requestState`. On the retry that answers it, the server performs the steps
+above that it has not completed.
 
 #### Repeated Retries
 
-A client can repeat a retry if it does not receive the response.
+If a client or gateway sends the retry that answers an upload input request, or a later retry in the
+logical call, and does not receive the response, the outcome is unknown. The tool may have run, in
+whole or in part. Clients and gateways **MUST NOT** send the retry again or start the call again
+automatically, unless they know the server did not process it.
+
+A `-32602` response to such a retry does not show that the tool did not run. Clients and gateways
+**MUST NOT** treat it as proof that the call failed, and **MUST NOT** repeat the call automatically.
+
+A gateway that does not receive the response **MUST** return `isError: true` to its caller, stating
+that the outcome is unknown. A host **MUST** tell the user or model that the outcome is unknown. Any
+new call needs the approval described in [Initial Call](#initial-call).
 
 The upload flow keeps no protocol session state by default. Each retry carries its context in the
 request and in `requestState`, so any instance that can reach the storage backend can process it. A
-tool that is safe to run twice, such as one that is idempotent on `digest` and its arguments, needs
-no claim. The server runs it again on a repeated retry, and treats a file it already finalized as
-confirmed at step 5.
+tool that is safe to run twice, such as one that is idempotent on its arguments, needs
+nothing more. If a retry repeats, the server runs the tool again, and treats a file it already
+finalized as confirmed at step 4.
 
-A tool that is unsafe to run twice must run only once per logical call, which [MRTR leaves to the
+For a tool that is unsafe to run twice, the server **MUST** accept each `requestState` at most once,
+from the one that answers the upload input request onward, as [MRTR leaves to the
 server](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#server-requirements-basic-workflow).
-Servers **MUST** bind one call identifier into every `requestState` of a logical call. Before
-running such a tool, the server **MUST** claim that identifier atomically, using storage every
-instance shares, and **MUST** keep the claim until every `requestState` of the call has expired. A
-claimed call counts as processed, even while the tool is running.
+It **MUST** consume each one atomically, in storage every instance shares, before it runs the tool
+or returns a later `InputRequiredResult`. It **MUST** issue a distinct `requestState` in each
+result, give each an expiry, and keep the record until that expiry.
 
-A server that receives a retry for a claimed call **MUST NOT** run the tool again and **MUST NOT**
-start a new round. It **MUST** return the original result to the same principal, or the
-`already_processed` error. A tool that can outlast a client or gateway timeout **SHOULD** use the
-[Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview).
-
-A gateway can repeat a retry, and **MUST** pass `already_processed` through unchanged. A gateway
-that repeats a retry and receives a `requestState` verification failure **MUST** return
-`already_processed` to its caller.
-
-A client that receives `already_processed`, or whose repeated retry fails `requestState`
-verification, **MUST NOT** treat the response as proof that the call failed, and **MUST NOT** repeat
-the call automatically. The outcome of the earlier attempt is unknown.
+A tool that can outlast a client or gateway timeout **SHOULD** use the [Tasks
+extension](https://modelcontextprotocol.io/extensions/tasks/overview).
 
 #### Staging
 
@@ -538,22 +517,23 @@ size.
 Staged bytes are application data that `requestState` refers to. They are not protocol session
 state. Servers manage their lifetime and cleanup, for example with storage-side expiry. Servers:
 
-- **MUST** keep staged bytes until the latest `requestState` bound to them expires or their target
-  is replaced, whichever comes first.
+- **MUST** keep staged bytes until the latest `requestState` bound to them expires.
 - **MUST NOT** expose a staged file as finished until they confirm it on the retry.
 - **MUST** allow any instance that receives the retry to confirm the staged bytes.
-- **SHOULD** prevent further writes through a target before verifying its bytes, and **SHOULD**
-  finalize the bytes they verified.
+- **SHOULD** issue targets that accept one write, and **SHOULD** finalize a copy of the bytes they
+  confirmed.
 
 A target that writes to the final destination creates the file before the server confirms it.
-Servers **SHOULD NOT** issue such a target unless the backend enforces the declared size and digest
-on the write, and the write cannot replace existing content. If a later check fails, the client
-reports `failed`, or no retry arrives before the `requestState` expires, the server **MUST** remove
-the file. Storage-side expiry can do this without tracking the call.
+Servers **SHOULD NOT** issue such a target unless the backend enforces the declared size
+on the write, and the write cannot replace existing content. If a later check fails, or no retry
+arrives before the `requestState` expires, the server **MUST** remove the file. Storage-side expiry
+can do this only if it can tell an unconfirmed file from a confirmed one. A server with no way to
+remove the file **MUST NOT** issue such a target.
 
 ### Downloads
 
-> **Note**: The working group has not reviewed this section yet.
+> **Note**: The working group has discussed downloads but has not reviewed this shape. See [Open
+> Questions](#open-questions).
 
 A tool returns files by listing them in the `_meta` of its `CallToolResult`, under the extension
 identifier, with one entry per file. The server **MUST** also describe the result in `content`:
@@ -569,7 +549,6 @@ identifier, with one entry per file. The server **MUST** also describe the resul
       "io.modelcontextprotocol/files": {
         "downloads": [
           {
-            "id": "export-1",
             "name": "q3-orders.csv",
             "mimeType": "text/csv",
             "size": 209715200,
@@ -590,15 +569,11 @@ interface ResultFilesMeta {
 }
 
 interface DownloadTarget {
-  /** Unique within this result. */
-  id: string;
   name?: string;
   /** "application/octet-stream" if unknown. */
   mimeType: string;
   /** Non-negative integer; size in bytes, after any Content-Encoding is removed. */
-  size?: number;
-  /** SHA-256 over the whole file, after any Content-Encoding is removed. */
-  digest?: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
+  size: number;
   /** url, path, credentials, and expiresAt have the same meaning as in UploadTarget. */
   url?: string;
   path?: string;
@@ -617,30 +592,17 @@ Servers:
   `download`, however that result is delivered.
 - **MUST NOT** list a target until the file can be fetched. This extension does not define how a
   tool waits for a file to exist.
-- **SHOULD** include `size` and `digest` when they know them.
 
 The client sends a `GET` to the target's `url` or resolved `path` with `headers`. A `200` response,
-or a `206` response to a range request, indicates success. Clients **MAY** use range requests to
-split or resume a download.
-
-`Content-Length` describes the message, not the file. It counts encoded bytes when
-`Content-Encoding` applies, counts one part on a `206`, and can be absent. Clients **MUST NOT** use
-it in place of the `size` and `digest` checks, and **MUST** treat a response that HTTP reports as
-incomplete as a failed transfer ([RFC 9112](https://www.rfc-editor.org/rfc/rfc9112#section-8)).
-
-Clients that use range requests **MUST** combine parts only if they share the same strong validator,
-and otherwise **MUST** restart. Offsets apply to the bytes as sent, so clients **MUST NOT** derive
-ranges from `size` for a representation with a `Content-Encoding`. Clients **MUST NOT** send a range
-request to a target with `size` 0.
+or a `206` response to a range request, indicates success. Clients **MAY** use range requests as [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#section-14) defines them to split or resume a download. Ranges apply to the bytes as sent, while `size` describes the file after any `Content-Encoding` is removed.
 
 Clients:
 
-- **MUST** check `size` and `digest`, if present, after receiving the whole file, and **MUST**
-  discard a file that fails a check.
+- **MUST** check `size` after receiving the whole file, and **MUST** discard a file that fails the
+  check.
 - **MUST** treat `name`, `mimeType`, `size`, and the bytes as untrusted.
 - **MUST NOT** use `name` as a filesystem path without reducing it to a safe base name.
-- **MUST** abort once the decoded bytes exceed `size`, and **SHOULD** apply their own limit when
-  `size` is absent.
+- **MUST** abort once the decoded bytes exceed `size`.
 - **SHOULD NOT** start a download after `expiresAt`.
 - **SHOULD** fetch a file they want before returning control to the model, if user or operator
   policy permits. A target cannot be renewed.
@@ -676,7 +638,6 @@ Clients **MUST** reject a target if:
 11. It does not conform to its type. A required member is missing, a member has the wrong JSON type,
     or, at any depth, a member other than `_meta` is not defined by this extension or by a
     capability the client declared.
-12. It has a `digest` whose `algorithm` is not `sha-256`.
 
 Member names are case-sensitive, and header names are compared case-insensitively. Clients **MUST**
 treat a member whose value is `null` as absent, and **MUST** ignore `_meta`. Servers **MUST NOT**
@@ -723,8 +684,7 @@ before any query string. With the MCP address `https://gateway.example.com/mcp/a
 resolves to `https://gateway.example.com/mcp/abc/uploads`. The query string of the MCP address is kept.
 A `path` target inherits the scheme of the MCP address. If the client followed a redirect to reach
 the MCP address, it resolves against the redirect's result. Clients **MUST** reject a `path` target
-over `http` unless the MCP address is on loopback or an operator allowlist permits it. A `digest`
-received over `http` does not protect against an active attacker on that network.
+over `http` unless the MCP address is on loopback or an operator allowlist permits it.
 
 #### stdio
 
@@ -740,7 +700,8 @@ A gateway **MAY** replace a target's `url` or `path`, `method`, `form`, `headers
 with a relay at its own origin. It **MUST** do so for a `url` target with `credentials: "include"`
 when it holds the credential for that server. A gateway that replaces targets **MUST** forward only
 the `upload` and `download` settings it implements, and **MUST NOT** add a target member other than
-under `_meta`.
+under `_meta`. A gateway **MUST NOT** pass a second upload input request to its caller in one
+logical call, and **MUST** return `isError: true` instead.
 
 A gateway that relays an upload **MUST**:
 
@@ -760,11 +721,9 @@ fetch the bytes from it with the original target's `headers` and `credentials`, 
 against the address it uses for the server, and serve them only to the caller. The relay
 **MUST NOT** answer `2xx` until the original target has.
 
-A relay **MUST** pass a download target's `size` and `digest` through unchanged unless it changes
-the bytes, and then **MUST** replace them with values for the bytes it serves, or remove them. A
-relay that checks a file while streaming it **MUST** abort the response without completing it if a
-check fails. A relay **MUST NOT** delimit a response by closing the connection, and **MUST** apply
-its own limit when `size` is absent.
+A relay **MUST** pass a download target's `size` through unchanged unless it changes the bytes, and
+then **MUST** replace it for the bytes it serves. A relay that checks a file while streaming it
+**MUST** abort the response without completing it if a check fails.
 
 A gateway that presents more than one server at one MCP address **MUST** replace every `path`
 target. Any other gateway that passes a `path` target through unchanged **MUST** route everything
@@ -773,9 +732,9 @@ and **MUST** attach its own credential for the server when the target has `crede
 
 ### Errors
 
-Servers **MUST** respond to the following conditions as shown. The `requestState`, `fileId`, status,
-and bytes conditions apply to a retry that answers an upload input request. `isError: true` means a
-`CallToolResult` with `isError` set to `true`. `-32021` is
+Servers **MUST** respond to the following conditions as shown. The `requestState`,
+`inputResponses.uploads`, and bytes conditions apply to a retry that answers an upload input
+request. `isError: true` means a `CallToolResult` with `isError` set to `true`. `-32021` is
 [`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/draft/schema#missingrequiredclientcapabilityerror).
 
 | Condition                                                                            | Response                                                                                             |
@@ -784,15 +743,13 @@ and bytes conditions apply to a retry that answers an upload input request. `isE
 | Non-empty file omits `data`, server has `upload`, request did not declare it         | `-32021` with `data.requiredCapabilities` listing the missing capability                             |
 | Server knows the tool can only return a download, request did not declare `download` | `-32021` as above, before running the tool                                                           |
 | Server cannot accept a file inline or out of band                                    | `isError: true`                                                                                      |
-| Inline data cannot be decoded, or an inline or empty file fails a size or digest check | `isError: true`                                                                                      |
+| Inline data cannot be decoded, or fails the size check                               | `isError: true`                                                                                      |
 | Duplicate `id` values in file arguments                                              | `isError: true`                                                                                      |
-| `requestState` fails verification                                                    | JSON-RPC `-32602`                                                                                    |
+| `requestState` fails verification or was already consumed                            | JSON-RPC `-32602`                                                                                    |
 | Tool name or arguments differ from `requestState`                                    | JSON-RPC `-32602`                                                                                    |
-| Duplicate or unknown `fileId`, or unknown status                                     | JSON-RPC `-32602`                                                                                    |
-| A file has status `failed`                                                           | `isError: true`, without running the tool                                                            |
-| Bytes have not arrived, and the server does not start a new round                    | `isError: true`, without running the tool                                                            |
+| `inputResponses.uploads` is missing or is not an object                              | JSON-RPC `-32602`                                                                                    |
+| Bytes have not arrived                                                               | `isError: true`, without running the tool                                                            |
 | Bytes arrived but fail a check                                                       | `isError: true`, without running the tool                                                            |
-| Logical call already claimed                                                         | Original result to the same principal, or JSON-RPC `-32602`, reason `already_processed`              |
 
 The error's `data` carries the reason under the extension identifier:
 
@@ -800,7 +757,7 @@ The error's `data` carries the reason under the extension identifier:
 {
   "code": -32602,
   "message": "Invalid params",
-  "data": { "io.modelcontextprotocol/files": { "reason": "already_processed" } }
+  "data": { "io.modelcontextprotocol/files": { "reason": "inline_too_large" } }
 }
 ```
 
@@ -833,8 +790,8 @@ does not implement it. Such a gateway cannot meet the rules in [Targets](#target
 Enforcing [Targets](#targets) does not stop a malicious server from sending a request of its choice
 to a public address, from the client's network position. With `form`, the server controls most of
 the request body. Targets do not protect services that trust a client's address, or form handlers
-without their own request-forgery defense. The `status` a client reports also tells the server
-whether the target accepted the request. Host approval happens before the target is known, so it
+without their own request-forgery defense. Whether a client sends the retry also tells the server
+whether every target accepted the request. Host approval happens before the target is known, so it
 does not cover this risk. Hosts **SHOULD** restrict `omit` targets to an allowlist of origins where
 an operator can provide one, and **SHOULD** do so for `form` targets in unattended use.
 
@@ -849,13 +806,13 @@ files. A compromised agent can write sensitive data to a file and try to send it
 
 Binding the principal, tool name, arguments, and upload targets to `requestState` prevents a client
 from uploading under one call's authorization and attaching the file to another call or destination.
-The required digest lets the server detect bytes replaced through an `omit` URL before it uses them.
 
 ### Writable Targets
 
-A target that remains writable after verification lets anyone holding it replace the file.
-Pre-signed URLs often cannot be revoked. Servers that use them rely on short lifetimes or finalize a
-copy of the verified bytes.
+This extension has no content digest, so a server cannot detect same-size bytes written through a
+leaked target. A target that stays writable lets anyone holding it replace the file, and pre-signed
+URLs often cannot be revoked. Servers rely on short lifetimes, targets that accept one write, or a
+copy of the confirmed bytes.
 
 ### Secret URLs
 
@@ -865,6 +822,14 @@ issue such URLs with the shortest lifetime that covers the expected transfer.
 ### Staged Files
 
 User files remain in staging until the server or storage-side expiry removes them.
+
+### Downloaded Files
+
+A download target needs no user approval, so a result can make a client send a `GET` of the server's
+choosing, with the server's headers, and the request tells the server the client acted on the
+result. A downloaded file can contain instructions aimed at the model, or content that harms an
+application that opens it. Hosts **SHOULD** treat downloaded files as untrusted tool output, and
+**SHOULD** apply a storage limit per result as well as per file.
 
 ### File Contents
 
@@ -877,15 +842,14 @@ accept.
 The reference implementation will include a TypeScript SDK branch with the upload input request and
 a client transfer helper, a reference server in front of an object store, and conformance scenarios
 for inline transfer, out-of-band transfer, a `form` target, target rejection, rejection on metadata,
-a failed upload, a digest mismatch, a repeated retry, and a download.
+a failed transfer with no retry, a size mismatch, a consumed `requestState`, a second upload input
+request, and a download.
 
 ## Open Questions
 
 1. **MRTR extensibility.** How should the specification enable extension-defined input requests?
-   Repeated retries may belong in the same change. That change should also allocate a core error
-   code for an already-processed call. Extensions cannot use the reserved range. Core allows a code
-   outside it, but such a code has no registry and can collide, so this draft reuses `-32602` with a
-   namespaced reason. This extension would then replace `already_processed` with the core code.
+   Repeated retries may belong in the same change, and it should let an extension limit repeats of
+   its own input requests.
 2. **Finalize.** Some backends return a commit handle in the transfer's HTTP response, such as an
    ETag or block ID, and the retry has no field for it. Owners of backends with an explicit commit
    step are asked to confirm whether finalizing on the retry works. An optional per-file field in
@@ -897,6 +861,17 @@ a failed upload, a digest mismatch, a repeated retry, and a download.
 4. **Resources.** Should a later revision apply this flow to resources?
 5. **`omit` binding.** Should `omit` targets be bound to an origin or allowlist, and should wildcard
    hosts be allowed?
+6. **Failure signal.** A server learns of a failed transfer only when no retry arrives. Should a
+   client be able to tell the server it gave up, so the server can release quota and clean up early?
+   A later revision can add this behind a capability.
+7. **Download shape.** This draft lists download targets in result `_meta`. Should it use
+   `resource_link` instead? How a tool returns a file that takes a long time to generate is also
+   open, and so is whether [Targets](#targets) should treat the two directions alike, including for
+   redirects.
+8. **Integrity.** This draft has no content digest. A required digest would detect same-size
+   replacement and tampered downloads, but it makes clients read each file twice, browsers cannot
+   hash a large file natively, and most backends need a full server read. Should a later revision
+   add one, and should it be required or optional?
 
 ## Future Work
 
