@@ -1,4 +1,4 @@
-# File Uploads Extension
+# File Uploads and Downloads Extension
 
 - **Status**: Draft
 - **Extension Identifier**: `io.modelcontextprotocol/files` (provisional)
@@ -38,6 +38,9 @@ This revision applies to tools. Resource behavior is unchanged from the base pro
 - **MCP address**: The URL a client sends MCP requests to. This URL can vary per hop and can differ
   from the server's canonical URI.
 - **Target**: The URL or path to which a client sends file bytes, or from which it fetches them.
+- **Gateway**: An intermediary that is a server to its caller and a client of the next hop.
+- **Relay**: A gateway that replaces a target with its own and carries the bytes between its caller
+  and the original target.
 - **Logical call**: An initial `tools/call` request and its retries, on one hop. A gateway's call to
   a server is a separate logical call from its caller's call to the gateway.
 
@@ -213,6 +216,9 @@ does not define how a host presents a result to the model.
 
 ### Uploads
 
+The upload flow keeps no protocol session state by default. Each retry carries its context in the
+request and in `requestState`, so any instance that can reach the storage can process it.
+
 #### Initial Call
 
 The client sends `tools/call` with every argument populated, and omits `data` for each file it will
@@ -244,7 +250,7 @@ to storage the server designates, or apply operator policy when no user is prese
 Servers **SHOULD** perform every check that does not require the bytes, such as destination
 authorization, quota, `accept`, and `maxSize`, and return a `CallToolResult` with `isError: true` if
 one fails. Servers **MUST** treat the metadata as client-asserted, re-check size and type once the
-bytes arrive, and **MUST NOT** treat a `digest` they did not establish as verified.
+bytes arrive, and **MUST NOT** rely on a `digest` they did not verify.
 
 The tool decides whether an existing file with the same name is a conflict. A tool that supports
 conditional writes accepts the revision or condition as a tool argument.
@@ -373,8 +379,8 @@ Clients:
 - **MUST** support `form` targets if they declare `upload`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
   file as the last part, named `fileField`.
-- **MUST** quote each part's `name` and the file's `filename` in UTF-8, writing `"`, CR, and LF as
-  `%22`, `%0D`, and `%0A`, as the [WHATWG multipart/form-data
+- **MUST** quote each part's `name`, and quote the file's `filename` in UTF-8, writing its `"`, CR,
+  and LF as `%22`, `%0D`, and `%0A`, as the [WHATWG multipart/form-data
   encoding](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm)
   does, and **MUST NOT** send `filename*`.
 - **MUST** set `filename` to the base name of `FileInput.name`, taken after both `/` and `\`. If
@@ -389,8 +395,7 @@ Clients:
   automatically resend a `POST` unless they know the target did not apply it.
 - **MUST** treat the call as failed if they receive a second upload input request in the logical
   call, and **MUST NOT** transfer to its targets or retry the call.
-- **MUST** treat a `401` or `403` from a target as a failed transfer, and **MUST NOT** start
-  authorization discovery from it.
+
 - **MUST** finish the upload flow without returning control to the model.
 
 Clients **MUST** send the retry only if every requested file received a `2xx` response. If a target
@@ -399,7 +404,7 @@ is rejected, a transfer fails, or the user cancels, the client **MUST NOT** send
 performs the transfer itself **MUST** return `isError: true` to its caller. A host **MUST** tell the
 user or model that the tool did not run, and **MUST NOT** claim that no bytes were stored.
 
-Servers **MUST NOT** include a target in a result's `content`.
+
 
 #### Retry
 
@@ -445,15 +450,15 @@ and **MUST** respond as [Errors](#errors) specifies when a step fails:
    and number spelling do not matter. A server that binds a hash **MUST** hash a form that preserves
    this.
 3. Check that `inputResponses.uploads` is present.
-4. Confirm with the storage backend that the bytes of each file bound in `requestState` arrived, for
-   example with a `HEAD` request or a session status query. If the tool's schema requires `digest`,
-   establish it by hashing the bytes, by comparing a SHA-256 the storage computed from them, or by a
-   write the storage rejects on mismatch, where the target's authorization fixes the expected
-   digest. A weaker hash or a client-supplied value does not establish it. Re-check size and type.
-   The server **MUST NOT** run the tool with bytes it has not confirmed.
+4. Confirm with the storage that the bytes of each file bound in `requestState` arrived, for example
+   with a `HEAD` request or a session status query. If the tool's schema requires `digest`, verify
+   it by hashing the bytes, by comparing a SHA-256 the storage computed from them, or by a write the
+   storage rejects on mismatch, where the target's authorization fixes the expected digest. A weaker
+   hash or a client-supplied value does not verify it. Re-check size and type. The server
+   **MUST NOT** run the tool with bytes it has not confirmed.
 5. If running the tool twice is unsafe, consume `requestState` as specified in [Repeated
    Retries](#repeated-retries). If another retry consumed it first, respond as for step 1.
-6. Perform any finalize step the backend needs, run the tool, and return its result.
+6. Perform any finalize step the storage needs, run the tool, and return its result.
 
 If a file's bytes have not arrived at step 4, the server **MAY** wait for them. If they do not
 arrive, it **MUST NOT** run the tool.
@@ -472,16 +477,15 @@ above that it has not completed.
 If a client sends the retry that answers an upload input request, or a later retry in the logical
 call, and does not receive the response, the outcome is unknown. The tool may have run, in whole or
 in part. Clients and gateways **MUST NOT** resend the retry or restart the call automatically unless
-they know the server did not process it. A `-32602` response does not show that.
+they know the server did not process it. A `-32602` response does not show that the tool did not
+run.
 
 A gateway that does not receive the response **MUST** return `isError: true` to its caller, stating
 that the outcome is unknown. A host **MUST** tell the user or model so. Any new call needs the
 approval described in [Initial Call](#initial-call).
 
-The upload flow keeps no protocol session state by default. Each retry carries its context in the
-request and in `requestState`, so any instance that can reach the storage backend can process it. A
-tool that is safe to run twice, such as one that is idempotent on its arguments, needs nothing more.
-If a retry repeats, the server runs the tool again and treats a file it already finalized as
+A tool that is safe to run twice, such as one that is idempotent on its arguments, needs nothing
+more. If a retry repeats, the server runs the tool again and treats a file it already finalized as
 confirmed at step 4.
 
 For a tool that is unsafe to run twice, the server **MUST** accept each `requestState` at most once,
@@ -504,10 +508,10 @@ Servers **SHOULD** issue targets that write to a staging location, enforce the d
 accept one write, and **SHOULD** finalize a copy of the bytes they confirmed. Servers **MUST** keep
 staged bytes until the latest `requestState` bound to them expires, and **MUST NOT** expose a staged
 file as finished until they confirm it on the retry. If the tool's schema requires `digest` and the
-target stays writable, servers **MUST** establish it on a copy the target cannot write, and run the
+target stays writable, servers **MUST** verify it on a copy the target cannot write, and run the
 tool on that copy.
 
-Servers **MUST NOT** issue a target that writes to the final destination unless the backend enforces
+Servers **MUST NOT** issue a target that writes to the final destination unless the storage enforces
 the declared size on the write, the write cannot replace existing content, and the server can remove
 an unconfirmed file. The server **MUST** remove the file if a later check fails or no retry arrives
 before the `requestState` expires.
@@ -621,6 +625,9 @@ Clients **MUST** reject a target that:
    field `name` is empty or contains a control character, `"`, or `\`; a field `name` equals
    `fileField`; or a field `value` contains a CR, LF, or NUL character.
 
+Clients **MUST** treat a `401` or `403` from a target as a failed transfer, and **MUST NOT** start
+authorization discovery from it. Servers **MUST NOT** include a target in a result's `content`.
+
 #### Credentials
 
 With `include`, clients **MUST** attach the `Authorization` credential they send on MCP requests to
@@ -650,8 +657,8 @@ has no more reach than any web page. No other client qualifies through CORS alon
 
 #### Redirects
 
-Clients **MUST NOT** follow redirects, and **MUST** treat a `3xx` response as a failed transfer. A
-`form` target **MUST NOT** ask the storage to answer success with a redirect.
+Clients **MUST NOT** follow redirects, and **MUST** treat a `3xx` response as a failed transfer.
+Servers **MUST NOT** ask the storage to answer a `form` upload with a redirect.
 
 #### Resolving `path`
 
@@ -689,7 +696,8 @@ A gateway **MUST NOT** forward its caller's credential upstream, and **MUST** re
 rather than pass a second upload input request to its caller. A gateway presenting more than one
 server at one MCP address **MUST** replace every `path` target. Any other gateway that passes one
 through unchanged **MUST** route everything under that MCP address to that one server, and **MUST**
-attach its own credential when the target has `credentials: "include"`.
+attach its own credential when the target has `credentials: "include"`. Operators **SHOULD NOT**
+enable this extension behind a gateway that does not implement it.
 
 ### Errors
 
@@ -718,7 +726,7 @@ logs, traces, and error reports.
 
 ### Server-Directed Requests
 
-Operators **SHOULD NOT** enable this extension behind a gateway that does not implement it.
+
 
 Enforcing [Targets](#targets) does not stop a malicious server from sending a request of its choice
 to a public address, from the client's network position. With `form`, the server controls most of
@@ -769,11 +777,10 @@ request, and a download.
 ## Open Questions
 
 1. **MRTR extensibility.** How should the specification enable extension-defined input requests?
-   Repeated retries may belong in the same change, and it should let an extension limit repeats of
-   its own input requests.
+   That change should also let an extension limit repeats of its own input requests.
 2. **Finalize.** Some backends return a commit handle in the transfer's HTTP response, such as an
-   ETag or block ID, and the retry has no field for it. Owners of backends with an explicit commit
-   step are asked to confirm whether finalizing on the retry works. An optional per-file field in
+   ETag, and the retry has no field for it. Owners of backends with an explicit commit step are
+   asked to confirm whether finalizing on the retry works. An optional per-file field in
    `UploadInputResponse` can be added if needed.
 3. **Tools behind an executor.** Gateways that expose a single generic tool hide the inner tool's
    schema, including `x-mcp-file`. The executor could declare its own file argument and map it to

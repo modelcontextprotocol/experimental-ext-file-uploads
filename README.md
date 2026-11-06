@@ -13,8 +13,7 @@ stay out of model context and out of JSON-RPC messages. Maintained by the
 
 A server marks file arguments in a tool's input schema. Each file argument contains its metadata
 and optional base64 data. When data is absent, the server rejects the call or requests an upload.
-The client uploads the bytes and retries with unchanged arguments and per-file outcomes. A tool
-returns a file by listing a download target in the result's `_meta`.
+The client uploads the bytes and retries with unchanged arguments. A tool returns a file by listing a download target in the result's `_meta`.
 
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
 The reference implementation will live in this repository.
@@ -23,9 +22,9 @@ The reference implementation will live in this repository.
 
 - [Working group meeting notes, October 2, 2026](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3412)
 - [SEP-2356: Declarative File Inputs](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2356)
-  (closed), source of the `x-mcp-file` keyword and inline encoding
-- [SEP-2631: File Objects and Transfer](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631),
-  prior art for file URIs and transfer descriptors
+  (closed), source of the `x-mcp-file` keyword and inline transfer
+- [SEP-2631: File Objects and Transfer](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631)
+  (closed), prior art for transfer descriptors
 - [SEP-2532: Resource Streaming](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2532),
   related work on getting file bytes from a server
 
