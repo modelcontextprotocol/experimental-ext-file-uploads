@@ -3,7 +3,9 @@
 - **Status**: Draft
 - **Extension Identifier**: `io.modelcontextprotocol/files` (provisional)
 - **Working Group**: [File Uploads](https://modelcontextprotocol.io/community/working-groups/file-uploads)
-- **Editors**: Den Delimarsky (@localden)
+- **Contributors**: Den Delimarsky (@localden), Wil St. Charles (@st-charles), Thomas Sarlandie
+  (@tsarlandie-oai), Patrick Rodgers (@patrick-rodgers), Kurtis Van Gent (@kurtisvg), Kryspin Ziemski
+  (@kziemski), Mike Eastes (@meastes)
 - **Discussion**: [File Uploads Working Group Discord thread](https://discord.com/channels/1358869848138059966/1551968557292593172/1552399008440520865)
   and issues in this repository
 
