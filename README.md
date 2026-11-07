@@ -12,7 +12,7 @@ stay out of model context and out of JSON-RPC messages. Maintained by the
 ## Overview
 
 A server marks file arguments in a tool's input schema. Each file argument contains its metadata
-and optional base64 data. When data is absent, the server rejects the call or requests an upload.
+and optional base64 data. When data is absent from a non-empty file, the server rejects the call or requests an upload.
 The client uploads the bytes and retries with unchanged arguments. A tool returns a file by listing a download target in the result's `_meta`.
 
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).

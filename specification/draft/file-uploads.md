@@ -38,7 +38,8 @@ This revision applies to tools. Resource behavior is unchanged from the base pro
 - **Host**: The application that presents the model and the user interface.
 - **MCP address**: The URL a client sends MCP requests to. This URL can vary per hop and can differ
   from the server's canonical URI.
-- **Target**: The URL or path to which a client sends file bytes, or from which it fetches them.
+- **Target**: An `UploadTarget` or `DownloadTarget` object, or the endpoint it names by `url` or
+  `path`, to which a client sends file bytes or from which it fetches them.
 - **Gateway**: An intermediary that is a server to its caller and a client of the next hop.
 - **Relay**: A gateway that replaces a target with its own and carries the bytes between its caller
   and the original target.
@@ -101,8 +102,9 @@ limits each file however it travels. A client can send a file inline if it fits 
 `maxInlineBytes`, and sends the rest out of band if the server advertises `upload`. With `upload`, a
 `maxInlineBytes` of 1 MiB, and a `maxSize` of 150 MiB, a 200 KiB file can go inline, a 40 MiB file
 goes out of band, and a 200 MiB file is rejected. A server with `upload` and no `maxInlineBytes`
-accepts files only out of band. Inline transfer needs no client declaration. Servers **MUST NOT**
-reject inline `data` because a request did not declare the extension.
+accepts files only out of band. An inline `tools/call` needs no declaration, but an inline-only
+client declares empty settings on `tools/list`. Servers **MUST NOT** reject inline `data` because a
+request did not declare the extension.
 
 ### Flow
 
@@ -141,9 +143,9 @@ sequenceDiagram
 
 A server marks a file argument by adding `x-mcp-file` directly to the argument's object schema in
 `Tool.inputSchema`. This behavior is consistent with
-[`x-mcp-header`](https://modelcontextprotocol.io/specification/draft/server/tools#x-mcp-header).
-`x-mcp-file` applies to objects and can appear in array items and in `anyOf` or `oneOf` branches. Servers **MUST** make the marked
-schema require the `FileInput` shape.
+[`x-mcp-header`](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header).
+`x-mcp-file` applies to objects and can appear in array items and in `anyOf` or `oneOf` branches.
+Servers **MUST** make the marked schema require the `FileInput` shape.
 
 ```typescript
 /** The value of x-mcp-file. */
@@ -212,8 +214,9 @@ before using the bytes. If the tool's schema requires `digest`, servers **MUST**
 inline `data` and empty files.
 
 A file with `size` 0 has no bytes to transfer. Clients **MUST** omit `data` for it. Servers **MUST**
-treat it as an empty file and **MUST NOT** issue a target for it. Servers **SHOULD** treat an empty
-`data` string the same way. A tool can still reject an empty file.
+treat a file with `size` 0 and no `data` as an empty file and **MUST NOT** issue a target for it.
+Servers **SHOULD** treat `size` 0 with an empty `data` string the same way, even without inline
+transfer. A tool can still reject an empty file.
 
 Clients that do not support this extension ignore the keyword, which JSON Schema treats as an
 annotation. Implementations of this extension **MUST** accept `x-mcp-file` in schema validators,
@@ -227,7 +230,7 @@ Hosts:
   replace the handle with a `FileInput` before sending the call.
 - **MUST** bind a file to an argument only on the user's selection or under the host's approval
   policy for model-supplied values.
-- **MUST NOT** place file bytes or any target in model context.
+- **MUST NOT** place any target in model context, or file bytes in order to fill a `FileInput`.
 
 These rules apply to any file the host can read, including a file an agent created. This extension
 does not define how a host presents a result to the model.
@@ -235,7 +238,9 @@ does not define how a host presents a result to the model.
 ### Uploads
 
 The upload flow keeps no protocol session state by default. Each retry carries its context in the
-request and in `requestState`, so any instance that can reach the storage can process it.
+request and in `requestState`, so any instance that can reach the storage can process it. A tool
+unsafe to run twice also needs the shared record that [Repeated Retries](#repeated-retries)
+requires.
 
 The flow uses its own result type, `upload_required`, and the retry pattern of [multi round-trip
 requests](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr). Core allows
@@ -399,7 +404,8 @@ body. With `form`, the body is `multipart/form-data` as defined in [RFC
 
 Clients:
 
-- **MUST** fail the call unless the `fileId`s in the upload request are exactly their non-empty files without `data`, each once.
+- **MUST** fail the call unless the `fileId`s in the upload request are exactly their non-empty
+  files without `data`, each once.
 - **MUST** support `form` targets if they declare `upload`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
   file as the last part, named `fileField`.
@@ -491,17 +497,17 @@ perform any other step it has not completed.
 
 #### Repeated Retries
 
-If a client sends the retry that answers an upload request, or a later retry in the logical
-call, and does not receive the response, the outcome is unknown. The tool may have run, in whole or
-in part. Clients and gateways **MUST NOT** resend the retry or restart the call automatically unless
-they know the server did not process it. A `-32602` response does not show that the tool did not
-run.
+If a client sends the retry that answers an upload request, or a later retry in the logical call,
+and does not receive the response, the outcome is unknown. The tool may have run, in whole or in
+part. Clients and gateways **MUST NOT** resend the retry or restart the call automatically unless
+they know the server did not process it. A `-32602` response to such a retry is also an unknown
+outcome.
 
-A gateway that does not receive the response **MUST** return `isError: true` to its caller, stating
-that the outcome is unknown. A host **MUST** tell the user or model so. Any new call needs the
-approval described in [Initial Call](#initial-call). A tool that is unsafe to run twice **SHOULD**
-accept an idempotency key as a tool argument, so that a new call after an unknown outcome does not
-repeat the work.
+A gateway that does not receive the response, or that performed the transfer itself and receives
+`-32602`, **MUST** return `isError: true` to its caller, stating that the outcome is unknown. A host
+**MUST** tell the user or model so. Any new call needs the approval described in [Initial
+Call](#initial-call). A tool that is unsafe to run twice **SHOULD** accept an idempotency key as a
+tool argument, so that a new call after an unknown outcome does not repeat the work.
 
 A tool that is safe to run twice, such as one that is idempotent on its arguments, needs nothing
 more. If a retry repeats, the server runs the tool again and treats a file it already finalized as
@@ -509,7 +515,7 @@ confirmed at step 3.
 
 For a tool that is unsafe to run twice, the server **MUST** accept each `requestState` at most once,
 from the one that answers the upload request onward.
-[MRTR](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr#server-requirements-basic-workflow)
+[MRTR](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr#server-requirements-basic-workflow)
 leaves this to the server. The server **MUST** consume each one atomically, in storage every
 instance shares, before it runs the tool or returns a later `InputRequiredResult`. It **MUST** issue
 a distinct `requestState` in each result, and keep the record until that `requestState` expires.
@@ -533,8 +539,9 @@ it on a copy the target cannot write, and run the tool on that copy.
 
 Servers **MUST NOT** issue a target that writes to the final destination unless the storage enforces
 the declared size on the write, the write cannot replace existing content, and the server can remove
-an unconfirmed file. The server **MUST** remove the file if a later check fails or no retry arrives
-before the `requestState` expires.
+an unconfirmed file. The server **MUST** remove the file if a later check or finalize step fails. It
+**SHOULD** remove it if no retry reaches step 5 before the latest `requestState` bound to the file
+expires, for example with a storage lifecycle rule.
 
 ### Downloads
 
@@ -632,9 +639,9 @@ clients **MUST** ignore `_meta`. Header names are compared case-insensitively.
 
 Clients **MUST** reject a target that:
 
-1. Does not conform to its type: it lacks exactly one of `url` and `path`, lacks a required member,
-   has a value its type does not allow, or has, at any depth, a member that neither this extension
-   nor a declared capability defines, other than `_meta` and the entries of `headers`.
+1. Does not conform to its type: it does not have exactly one of `url` and `path`, lacks a required
+   member, has a value its type does not allow, or has, at any depth, a member that neither this
+   extension nor a declared capability defines, other than `_meta` and the entries of `headers`.
 2. Has a `url` that is not an absolute `https` URL or that contains userinfo, or a `path` that does
    not match `1*( "/" segment )`, where `segment` is one or more ASCII letters, digits, `-`, `_`,
    `~`, or `.`, and is neither `.` nor `..`.
@@ -649,9 +656,9 @@ Clients **MUST** reject a target that:
    field `name` is empty or contains a control character, `"`, or `\`; a field `name` equals
    `fileField`; or a field `value` contains a CR, LF, or NUL character.
 
-An operator allowlist **MAY** permit `http` on loopback. Clients **MUST** treat a `401` or `403`
-from a target as a failed transfer, and **MUST NOT** start authorization discovery from it. Servers
-**MUST NOT** include a target in a result's `content` or `structuredContent`.
+An operator allowlist **MAY** permit an `http` `url` on loopback. Clients **MUST** treat a `401` or
+`403` from a target as a failed transfer, and **MUST NOT** start authorization discovery from it.
+Servers **MUST NOT** include a target in a result's `content` or `structuredContent`.
 
 #### Credentials
 
@@ -661,7 +668,7 @@ client certificates, or platform-supplied authentication.
 
 Clients **MUST** honor `include` only on a `path` target, or when `url` has the same [RFC
 6454](https://www.rfc-editor.org/rfc/rfc6454) origin as the server's [canonical
-URI](https://modelcontextprotocol.io/specification/draft/basic/authorization#canonical-server-uri).
+URI](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#canonical-server-uri).
 A client that learned no canonical URI through authorization uses the MCP address. Behind a gateway,
 the comparison uses the canonical URI of the server whose credential is attached. Otherwise the
 client **MUST** reject the target.
@@ -716,7 +723,8 @@ its caller, it is a target. A relay:
   that `fileId` names.
 - **MUST NOT** answer `2xx` until the original target has, and **MUST** abort a streamed response
   without completing it if the transfer or a check fails.
-- **MAY** check `size` and `digest` only on whole-file responses, not on range responses.
+- **MUST** check `size`, and `digest` if present, on whole-file responses, and **MAY** skip them on
+  range responses.
 - **MUST** pass `size` and `digest` through unchanged unless it changes a download's bytes, and then
   **MUST** update `size` and update or remove `digest`.
 
@@ -733,7 +741,7 @@ this extension behind a gateway that does not implement it.
 
 Servers **MUST** respond as shown. Conditions on `requestState`, the tool name, arguments, and
 principal apply to every retry from the one that answers an upload request onward. `-32021` is
-[`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/draft/schema#missingrequiredclientcapabilityerror).
+[`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/2026-07-28/schema#missingrequiredclientcapabilityerror).
 
 | Condition                                                                                                                                                                                   | Response                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -741,7 +749,7 @@ principal apply to every retry from the one that answers an upload request onwar
 | Server knows the tool can only return a download, request did not declare `download`                                                                                                        | `-32021` as above, before running the tool                               |
 | Inline `data` is over `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
 | `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                        | JSON-RPC `-32602`                                                        |
-| Bytes have not arrived or fail a check                                                                                                                                                      | `isError: true`, without running the tool                                |
+| Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                   | `isError: true`, without running the tool                                |
 
 ## Backward Compatibility
 
@@ -776,8 +784,10 @@ those applications **SHOULD** reject a token not issued for them.
 ### Exfiltration
 
 A malicious server can name any public URL as an `omit` target and receive the file there. `POST`
-reaches more existing endpoints than `PUT`, and `form` also reaches HTML form handlers. The host
-approval required before the initial call mitigates this risk.
+reaches more existing endpoints than `PUT`, and `form` also reaches HTML form handlers. Host
+approval limits which files a server can receive this way, not where they go, because the target is
+not yet known. An allowlist of `omit` origins, as in [Server-Directed
+Requests](#server-directed-requests), limits the destination.
 
 ### Writable Targets
 
@@ -824,15 +834,15 @@ request, and a download.
    the same gap, because no file argument exists. The group needs to answer this before the
    extension leaves the experimental phase.
 3. **Resources.** Should a later revision apply this flow to resources?
-4. **`omit` binding.** Should `omit` targets be bound to an origin or allowlist, and should wildcard
-   hosts be allowed?
+4. **`omit` binding.** Should `omit` targets be bound to an origin, should the allowlist become
+   mandatory, and should wildcard hosts be allowed?
 5. **Failure signal.** A server learns of a failed transfer only when no retry arrives. Should a
    client be able to tell the server it gave up, so the server can release quota and clean up early?
    A later revision can add this behind a capability.
 6. **Download shape.** This draft lists download targets in result `_meta`. Should it use
    `resource_link` instead? How a tool returns a file that takes a long time to generate is also
-   open, and so is whether [Targets](#targets) should treat the two directions alike, including for
-   redirects.
+   open, and so is whether [Targets](#targets) should keep treating the two directions alike,
+   including for redirects.
 7. **Integrity.** `digest` is optional, and a tool that needs it requires it in its schema. A
    required digest would detect same-size replacement for every file, but it makes clients read each
    file twice, browsers cannot hash a large file natively, and most backends need a full server
