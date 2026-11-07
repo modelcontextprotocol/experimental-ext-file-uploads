@@ -108,35 +108,54 @@ An inline-only client declares empty settings on `tools/list`. Servers **MUST NO
 
 ### Flow
 
-A client sends a file inline or out of band. A tool returns a file through a download target.
+A client sends a file inline or out of band:
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
+    participant M as Model
+    participant H as Host and client
     participant S as MCP server
     participant T as Target
 
-    Note over C,S: Inline upload
-    C->>S: tools/call with file metadata and data
-    S-->>C: CallToolResult
-
-    Note over C,T: Out-of-band upload
-    C->>S: tools/call with file metadata
-    alt rejected on metadata
-        S-->>C: CallToolResult {isError: true}
-    else accepted
-        S-->>C: upload_required {uploads, requestState}
-        C->>T: PUT or POST bytes
-        T-->>C: 2xx
-        C->>S: same arguments + requestState
-        S-->>C: CallToolResult
+    M->>H: Call save_to_folder
+    Note over H: User or operator policy approves sending the file
+    alt Inline upload
+        H->>S: tools/call with file metadata and data
+        S-->>H: CallToolResult
+    else Out-of-band upload
+        H->>S: tools/call with file metadata
+        alt Rejected on metadata
+            S-->>H: CallToolResult {isError: true}
+        else Accepted
+            S-->>H: upload_required {uploads, requestState}
+            H->>T: PUT or POST bytes
+            T-->>H: 2xx
+            H->>S: same arguments + requestState
+            Note over S: Confirm with storage that the bytes arrived
+            Note over S: Finalize if needed, then run the tool
+            S-->>H: CallToolResult
+        end
     end
+    H-->>M: Result, with no target
+```
 
-    Note over C,T: Download
-    C->>S: tools/call
-    S-->>C: CallToolResult with download target in _meta
-    C->>T: GET
-    T-->>C: 200 or 206 with bytes
+A tool returns a file through a download target:
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant H as Host and client
+    participant S as MCP server
+    participant T as Target
+
+    M->>H: Call export_orders
+    H->>S: tools/call
+    S-->>H: CallToolResult with download target in _meta
+    opt Client wants the file and policy permits
+        H->>T: GET
+        T-->>H: 200 or 206 with bytes
+    end
+    H-->>M: Result, with no target
 ```
 
 ### File Arguments
