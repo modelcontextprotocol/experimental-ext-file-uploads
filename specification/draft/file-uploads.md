@@ -649,7 +649,8 @@ Clients:
 - **MUST NOT** overwrite an existing file without the user's approval, and **MUST NOT** set execute
   permission.
 - **MUST** abort once the decoded bytes exceed `size`.
-- **SHOULD NOT** start a download after `expiresAt`.
+- **SHOULD NOT** start a download after `expiresAt`. A range request that continues a download is
+  not a new start, and a target can still refuse it.
 - **SHOULD** fetch a file they want before returning control to the model, if user or operator
   policy permits. A target cannot be renewed.
 - **MUST NOT** repeat the call automatically.
