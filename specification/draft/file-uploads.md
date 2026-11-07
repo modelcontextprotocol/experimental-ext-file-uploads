@@ -102,9 +102,9 @@ limits each file however it travels. A client can send a file inline if it fits 
 `maxInlineBytes`, and sends the rest out of band if the server advertises `upload`. With `upload`, a
 `maxInlineBytes` of 1 MiB, and a `maxSize` of 150 MiB, a 200 KiB file can go inline, a 40 MiB file
 goes out of band, and a 200 MiB file is rejected. A server with `upload` and no `maxInlineBytes`
-accepts files only out of band. An inline `tools/call` needs no declaration, but an inline-only
-client declares empty settings on `tools/list`. Servers **MUST NOT** reject inline `data` because a
-request did not declare the extension.
+accepts files only out of band. A client need not declare the extension on an inline `tools/call`.
+An inline-only client declares empty settings on `tools/list`. Servers **MUST NOT** reject inline
+`data` because a request did not declare the extension.
 
 ### Flow
 
@@ -230,7 +230,8 @@ Hosts:
   replace the handle with a `FileInput` before sending the call.
 - **MUST** bind a file to an argument only on the user's selection or under the host's approval
   policy for model-supplied values.
-- **MUST NOT** place any target in model context, or file bytes in order to fill a `FileInput`.
+- **MUST NOT** place any target in model context, and **MUST NOT** place file bytes there to fill a
+  `FileInput`.
 
 These rules apply to any file the host can read, including a file an agent created. This extension
 does not define how a host presents a result to the model.
@@ -279,8 +280,9 @@ to storage the server designates, or apply operator policy when no user is prese
 
 Servers **SHOULD** perform every check that does not require the bytes, such as destination
 authorization, quota, `accept`, and `maxSize`, and return a `CallToolResult` with `isError: true` if
-one fails. Servers **MUST** treat the metadata as client-asserted, re-check size, and type if the
-tool restricts it, once the bytes arrive, and **MUST NOT** rely on a `digest` they did not verify.
+one fails. Servers **MUST** treat the metadata as client-asserted. Once the bytes arrive, they
+**MUST** re-check size, and type if the tool restricts it. They **MUST NOT** rely on a `digest` they
+did not verify.
 
 The tool decides whether an existing file with the same name is a conflict. A tool that supports
 conditional writes accepts the revision or condition as a tool argument.
@@ -404,8 +406,8 @@ body. With `form`, the body is `multipart/form-data` as defined in [RFC
 
 Clients:
 
-- **MUST** fail the call unless the `fileId`s in the upload request are exactly their non-empty
-  files without `data`, each once.
+- **MUST** fail the call unless the upload request lists each non-empty file without `data` exactly
+  once, and no other `fileId`.
 - **MUST** support `form` targets if they declare `upload`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
   file as the last part, named `fileField`.
@@ -441,8 +443,8 @@ It **MUST NOT** reuse an earlier target or `requestState`.
 #### Retry
 
 When retrying, the client sends a new JSON-RPC `id`, the same tool name and arguments, and echoes
-`requestState` exactly. Clients **MUST NOT** inspect or modify it. Sending it states that every
-requested file received a `2xx` response:
+`requestState` exactly. Clients **MUST NOT** inspect or modify it. Sending `requestState` states
+that every requested file received a `2xx` response:
 
 ```json
 {
@@ -485,7 +487,7 @@ and **MUST** respond as [Errors](#errors) specifies when a step fails:
 4. If running the tool twice is unsafe, consume `requestState` as specified in [Repeated
    Retries](#repeated-retries). If another retry consumed it first, respond as for step 1.
 5. Perform any finalize step the storage needs, run the tool or create its task, and return the
-   result. A server finalizes only in that round.
+   result. A server finalizes only at this step.
 
 If a file's bytes have not arrived at step 3, the server **MAY** wait for them. If they do not
 arrive, it **MUST NOT** run the tool.
@@ -530,12 +532,16 @@ where bytes wait between the transfer and the retry. The server owns it and clea
 the client nor a relay has to hold the bytes for the retry. Staged bytes are application data that
 `requestState` refers to. They are not protocol session state.
 
-Servers **SHOULD** issue targets that write to a staging location, enforce the declared size, and
-accept one write, and **SHOULD** finalize a copy of the bytes they confirmed. Servers **MUST** keep
-staged bytes until the latest `requestState` bound to them expires, **SHOULD** delete bytes no retry
-finalized after that, and **MUST NOT** expose a staged file as finished until they confirm it on the
-retry. If the tool's schema requires `digest` and the target stays writable, servers **MUST** verify
-it on a copy the target cannot write, and run the tool on that copy.
+Servers:
+
+- **SHOULD** issue targets that write to a staging location, enforce the declared size, and accept
+  one write.
+- **SHOULD** finalize a copy of the bytes they confirmed.
+- **MUST** keep staged bytes until the latest `requestState` bound to them expires.
+- **SHOULD** delete bytes no retry finalized after that.
+- **MUST NOT** expose a staged file as finished until they confirm it on the retry.
+- **MUST** verify `digest` on a copy the target cannot write, and run the tool on that copy, if the
+  tool's schema requires `digest` and the target stays writable.
 
 Servers **MUST NOT** issue a target that writes to the final destination unless the storage enforces
 the declared size on the write, the write cannot replace existing content, and the server can remove
@@ -668,10 +674,10 @@ client certificates, or platform-supplied authentication.
 
 Clients **MUST** honor `include` only on a `path` target, or when `url` has the same [RFC
 6454](https://www.rfc-editor.org/rfc/rfc6454) origin as the server's [canonical
-URI](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#canonical-server-uri).
-A client that learned no canonical URI through authorization uses the MCP address. Behind a gateway,
-the comparison uses the canonical URI of the server whose credential is attached. Otherwise the
-client **MUST** reject the target.
+URI](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#canonical-server-uri),
+and **MUST** reject any other `include` target. A client that learned no canonical URI through
+authorization uses the MCP address. Behind a gateway, the comparison uses the canonical URI of the
+server whose credential is attached.
 
 `include` lets a server choose the path, method, and body of a request sent with the client's
 credential. Servers **MUST NOT** issue an `include` target for a URL that another application
@@ -714,9 +720,9 @@ transfer unless a gateway relays it.
 
 A gateway **MAY** relay a target by replacing its `url` or `path`, `form`, `headers`, and
 `credentials` with a target at its own origin, keeping `method`. It **MUST NOT** pass a `url` target
-with `credentials: "include"` to its caller, and instead relays it, performs the transfer itself, or
-rejects it. A relay is a client of the original target, so every client rule applies upstream. To
-its caller, it is a target. A relay:
+with `credentials: "include"` to its caller. It **MUST** instead relay it, perform the transfer
+itself, or reject it. A relay is a client of the original target, so every client rule applies
+upstream. To its caller, it is a target. A relay:
 
 - **MUST** forward only the `upload` and `download` settings it implements.
 - **MUST** present a `form` target without `form`, and build the multipart body from the `FileInput`
@@ -728,14 +734,17 @@ its caller, it is a target. A relay:
 - **MUST** pass `size` and `digest` through unchanged unless it changes a download's bytes, and then
   **MUST** update `size` and update or remove `digest`.
 
-A gateway with an authenticated caller **MUST** bind that principal to each `requestState` and
-`path` target it returns, by wrapping the value or keeping a record, and check it on use. A gateway
-**MUST NOT** forward its caller's credential upstream, and **MUST** return `isError: true` rather
-than pass a second upload request to its caller. A gateway presenting more than one server at one
-MCP address **MUST** replace every `path` target. Any other gateway that passes one through
-unchanged **MUST** route everything under that MCP address to that one server, and **MUST** attach
-its own credential when the target has `credentials: "include"`. Operators **SHOULD NOT** enable
-this extension behind a gateway that does not implement it.
+Gateways:
+
+- **MUST** bind an authenticated caller's principal to each `requestState` and `path` target they
+  return, by wrapping the value or keeping a record, and check it on use.
+- **MUST NOT** forward their caller's credential upstream.
+- **MUST** return `isError: true` rather than pass a second upload request to their caller.
+- **MUST** replace every `path` target if they present more than one server at one MCP address.
+- **MUST**, if they pass a `path` target through unchanged, route everything under that MCP address
+  to that one server, and attach their own credential when the target has `credentials: "include"`.
+
+Operators **SHOULD NOT** enable this extension behind a gateway that does not implement it.
 
 ### Errors
 
