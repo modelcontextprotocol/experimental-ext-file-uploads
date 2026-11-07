@@ -246,9 +246,8 @@ requires.
 The flow uses its own result type, `upload_required`, and the retry pattern of [multi round-trip
 requests](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr). Core allows
 extensions to add result types, and a client that does not recognize one treats the result as
-invalid. Bytes travel over HTTP to a target because storage APIs already accept them there. An MCP
-upload method would put the bytes back in JSON-RPC messages and on the server's path, and the client
-would send them before the server had seen the call and could reject it.
+invalid. Bytes go over HTTP because storage APIs already accept them that way. An MCP upload method
+would route them through JSON-RPC and the server, before the server could reject the call.
 
 #### Initial Call
 
@@ -340,7 +339,7 @@ interface UploadTarget {
   credentials: "omit" | "include";
   /** ISO 8601 timestamp. Advisory latest start time for the transfer. */
   expiresAt?: string;
-  /** Carries no transfer semantics. */
+  /** Not used for the transfer. */
   _meta?: { [key: string]: unknown };
 }
 
@@ -467,7 +466,7 @@ that every requested file received a `2xx` response:
 }
 ```
 
-The retry does not show that the bytes arrived.
+A retry is not proof that the bytes arrived.
 
 On a retry that answers an upload request, the server **MUST** perform these steps in order,
 and **MUST** respond as [Errors](#errors) specifies when a step fails:
@@ -511,9 +510,9 @@ A gateway that does not receive the response, or that performed the transfer its
 Call](#initial-call). A tool that is unsafe to run twice **SHOULD** accept an idempotency key as a
 tool argument, so that a new call after an unknown outcome does not repeat the work.
 
-A tool that is safe to run twice, such as one that is idempotent on its arguments, needs nothing
-more. If a retry repeats, the server runs the tool again and treats a file it already finalized as
-confirmed at step 3.
+A tool that is safe to run twice, such as one that is idempotent on its arguments, has no further
+requirements. If a retry repeats, the server runs the tool again and treats a file it already
+finalized as confirmed at step 3.
 
 For a tool that is unsafe to run twice, the server **MUST** accept each `requestState` at most once,
 from the one that answers the upload request onward.
@@ -602,7 +601,7 @@ interface DownloadTarget {
   headers?: { [name: string]: string };
   credentials: "omit" | "include";
   expiresAt?: string;
-  /** Carries no transfer semantics. */
+  /** Not used for the transfer. */
   _meta?: { [key: string]: unknown };
 }
 ```
@@ -634,7 +633,7 @@ Clients:
 - **SHOULD NOT** start a download after `expiresAt`.
 - **SHOULD** fetch a file they want before returning control to the model, if user or operator
   policy permits. A target cannot be renewed.
-- **MUST NOT** repeat the call automatically. A repeated call runs the tool again.
+- **MUST NOT** repeat the call automatically.
 
 Servers can return small files as embedded resources, as defined in the base protocol.
 
@@ -691,8 +690,8 @@ special-purpose registries](https://www.rfc-editor.org/rfc/rfc6890) mark as not 
 unless an operator allowlist permits it or the target is a `path` under an `https` or loopback MCP
 address. A client behind a forward proxy **MUST** use a proxy that refuses these addresses after
 resolving the name, or **MUST** reject `url` targets not on an operator allowlist. A browser page
-that sends the transfer with `fetch` meets this rule through the browser's own limits, because it
-has no more reach than any web page. No other client qualifies through CORS alone.
+that sends the transfer with `fetch` meets this rule, because the browser limits its reach. For any
+other client, CORS alone does not meet it.
 
 #### Redirects
 
