@@ -163,11 +163,8 @@ sequenceDiagram
 A server marks a file argument by adding `x-mcp-file` directly to the argument's object schema in
 `Tool.inputSchema`. This behavior is consistent with
 [`x-mcp-header`](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header).
-`x-mcp-file` applies to objects and can appear in array items, in the `anyOf` or `oneOf` branches
-of the argument or of its items, and in the items of an array that is such a branch. Servers
-**MUST NOT** put it in an `anyOf` or `oneOf` nested inside a branch, or on a schema that holds an
-`anyOf` or `oneOf` unless that schema is itself the object schema that requires `FileInput`. Servers
-**MUST** make the marked schema require the `FileInput` shape.
+`x-mcp-file` applies to objects and can appear in array items and in `anyOf` or `oneOf` branches.
+Servers **MUST** make the marked schema require the `FileInput` shape.
 
 ```typescript
 /** The value of x-mcp-file. */
@@ -432,8 +429,7 @@ Clients:
 - **MUST** fail the call unless the upload request lists each non-empty file without `data` exactly
   once, and no other `fileId`.
 - **MUST** fail the call if an upload request's `requestState` is absent, `null`, or not a string.
-- **MUST** support `form` targets if they declare `upload`, unless every target they receive comes
-  through a relay that presents `form` targets without `form`.
+- **MUST** support `form` targets if they declare `upload`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
   file as the last part, named `fileField`.
 - **MUST** quote each part's `name`, and quote the file's `filename` in UTF-8, writing its `"`, CR,
@@ -564,7 +560,7 @@ Servers:
 - **SHOULD** issue targets that write to a staging location, enforce the declared size, and accept
   one write.
 - **SHOULD** finalize a copy of the bytes they confirmed.
-- **SHOULD** keep staged bytes until the latest `requestState` bound to them expires.
+- **MUST** keep staged bytes until the latest `requestState` bound to them expires.
 - **SHOULD** delete bytes no retry finalized after that.
 - **MUST NOT** expose a staged file as finished until they confirm it on the retry.
 - **MUST** verify `digest` on a copy the target cannot write, and run the tool on that copy, if the
@@ -677,8 +673,6 @@ Clients **MUST** reject a target that:
 1. Does not conform to its type: it does not have exactly one of `url` and `path`, lacks a required
    member, has a value its type does not allow, or has, at any depth, a member that neither this
    extension nor a declared capability defines, other than `_meta` and the entries of `headers`.
-   An `expiresAt` that is not an RFC 3339 timestamp with a time zone is a value its type does not
-   allow.
 2. Has a `url` that is not an absolute `https` URL or that contains userinfo, or a `path` that does
    not match `1*( "/" segment )`, where `segment` is one or more ASCII letters, digits, `-`, `_`,
    `~`, or `.`, and is neither `.` nor `..`.
@@ -712,10 +706,8 @@ server whose credential is attached.
 
 `include` lets a server choose the path, method, and body of a request sent with the client's
 credential. Servers **MUST NOT** issue an `include` target for a URL that another application
-serves, including one behind the same reverse proxy. A service is not another application only if
-it is part of the server, accepts only tokens issued for the server's canonical URI, and exists to
-serve this server's targets. Servers **MUST** verify that the credential on an `include` target
-identifies the principal the target was issued to.
+serves, including one behind the same reverse proxy. Servers **MUST** verify that the credential on
+an `include` target identifies the principal the target was issued to.
 
 #### Addresses
 
