@@ -163,8 +163,11 @@ sequenceDiagram
 A server marks a file argument by adding `x-mcp-file` directly to the argument's object schema in
 `Tool.inputSchema`. This behavior is consistent with
 [`x-mcp-header`](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header).
-`x-mcp-file` applies to objects and can appear in array items and in `anyOf` or `oneOf` branches.
-Servers **MUST** make the marked schema require the `FileInput` shape.
+`x-mcp-file` applies to objects and can appear in array items, in the `anyOf` or `oneOf` branches
+of the argument or of its items, and in the items of an array that is such a branch. Servers
+**MUST NOT** put it in an `anyOf` or `oneOf` nested inside a branch, or on a schema that holds an
+`anyOf` or `oneOf` unless that schema is itself the object schema that requires `FileInput`. Servers
+**MUST** make the marked schema require the `FileInput` shape.
 
 ```typescript
 /** The value of x-mcp-file. */
@@ -230,7 +233,9 @@ This can be represented in a server's schema as follows:
 
 Clients **MUST** make each `id` unique within the call. Servers **MUST** validate the decoded size
 before using the bytes. If the tool's schema requires `digest`, servers **MUST** check it against
-inline `data` and empty files.
+inline `data` and empty files. The `null` rule in [Targets](#targets) does not apply to `FileInput`.
+Clients **MUST NOT** send a `data` member whose value is `null`, and servers treat one as
+undecodable inline `data`.
 
 A file with `size` 0 has no bytes to transfer. Clients **MUST** omit `data` for it. Servers **MUST**
 treat a file with `size` 0 and no `data` as an empty file and **MUST NOT** issue a target for it.
@@ -356,7 +361,7 @@ interface UploadTarget {
    * credential.
    */
   credentials: "omit" | "include";
-  /** ISO 8601 timestamp. Advisory latest start time for the transfer. */
+  /** RFC 3339 timestamp with a time zone. Advisory latest start time for the transfer. */
   expiresAt?: string;
   /** Not used for the transfer. */
   _meta?: { [key: string]: unknown };
@@ -426,7 +431,9 @@ Clients:
 
 - **MUST** fail the call unless the upload request lists each non-empty file without `data` exactly
   once, and no other `fileId`.
-- **MUST** support `form` targets if they declare `upload`.
+- **MUST** fail the call if an upload request's `requestState` is absent, `null`, or not a string.
+- **MUST** support `form` targets if they declare `upload`, unless every target they receive comes
+  through a relay that presents `form` targets without `form`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
   file as the last part, named `fileField`.
 - **MUST** quote each part's `name`, and quote the file's `filename` in UTF-8, writing its `"`, CR,
@@ -505,7 +512,9 @@ and **MUST** respond as [Errors](#errors) specifies when a step fails:
 4. If running the tool twice is unsafe, consume `requestState` as specified in [Repeated
    Retries](#repeated-retries). If another retry consumed it first, respond as for step 1.
 5. Perform any finalize step the storage needs, run the tool or create its task, and return the
-   result. A server finalizes only at this step.
+   result. A server finalizes only at this step. A commit that keeps the bytes in a staging location
+   is not a finalize. It can happen at step 3, and a repeated retry treats bytes already committed
+   this way as arrived.
 
 If a file's bytes have not arrived at step 3, the server **MAY** wait for them. If they do not
 arrive, it **MUST NOT** run the tool.
@@ -555,7 +564,7 @@ Servers:
 - **SHOULD** issue targets that write to a staging location, enforce the declared size, and accept
   one write.
 - **SHOULD** finalize a copy of the bytes they confirmed.
-- **MUST** keep staged bytes until the latest `requestState` bound to them expires.
+- **SHOULD** keep staged bytes until the latest `requestState` bound to them expires.
 - **SHOULD** delete bytes no retry finalized after that.
 - **MUST NOT** expose a staged file as finished until they confirm it on the retry.
 - **MUST** verify `digest` on a copy the target cannot write, and run the tool on that copy, if the
@@ -565,7 +574,8 @@ Servers **MUST NOT** issue a target that writes to the final destination unless 
 the declared size on the write, the write cannot replace existing content, and the server can remove
 an unconfirmed file. The server **MUST** remove the file if a later check or finalize step fails. It
 **SHOULD** remove it if no retry reaches step 5 before the latest `requestState` bound to the file
-expires, for example with a storage lifecycle rule.
+expires, for example with a storage lifecycle rule. A storage step that anyone holding the target
+can trigger, such as a commit, counts as the target writing where that step writes.
 
 ### Downloads
 
@@ -666,6 +676,8 @@ Clients **MUST** reject a target that:
 1. Does not conform to its type: it does not have exactly one of `url` and `path`, lacks a required
    member, has a value its type does not allow, or has, at any depth, a member that neither this
    extension nor a declared capability defines, other than `_meta` and the entries of `headers`.
+   An `expiresAt` that is not an RFC 3339 timestamp with a time zone is a value its type does not
+   allow.
 2. Has a `url` that is not an absolute `https` URL or that contains userinfo, or a `path` that does
    not match `1*( "/" segment )`, where `segment` is one or more ASCII letters, digits, `-`, `_`,
    `~`, or `.`, and is neither `.` nor `..`.
@@ -699,8 +711,10 @@ server whose credential is attached.
 
 `include` lets a server choose the path, method, and body of a request sent with the client's
 credential. Servers **MUST NOT** issue an `include` target for a URL that another application
-serves, including one behind the same reverse proxy. Servers **MUST** verify that the credential on
-an `include` target identifies the principal the target was issued to.
+serves, including one behind the same reverse proxy. A service is not another application only if
+it is part of the server, accepts only tokens issued for the server's canonical URI, and exists to
+serve this server's targets. Servers **MUST** verify that the credential on an `include` target
+identifies the principal the target was issued to.
 
 #### Addresses
 
@@ -734,15 +748,20 @@ has no canonical URI or MCP address. Clients on stdio **MUST** reject any other 
 ### Gateways
 
 The component that holds the bytes to upload, or that will keep a downloaded file, performs the
-transfer unless a gateway relays it.
+transfer unless a gateway relays it. A gateway that reads the bytes from its own store performs the
+transfer itself.
 
 A gateway **MAY** relay a target by replacing its `url` or `path`, `form`, `headers`, and
-`credentials` with a target at its own origin, keeping `method`. It **MUST NOT** pass a `url` target
+`credentials` with a target at its own origin, keeping `method`. It **MAY** set an earlier
+`expiresAt` on its own target and **MUST NOT** set a later one or omit one the original has. It
+**MUST NOT** pass a `url` target
 with `credentials: "include"` to its caller. It **MUST** instead relay it, perform the transfer
 itself, or reject it. A relay is a client of the original target, so every client rule applies
 upstream. To its caller, it is a target. A relay:
 
-- **MUST** forward only the `upload` and `download` settings it implements.
+- **MUST** declare to the server only the `upload` and `download` settings it implements and its
+  caller declared, and **MUST** advertise `upload` to its caller only if it implements it and the
+  server advertised it.
 - **MUST** present a `form` target without `form`, and build the multipart body from the `FileInput`
   that `fileId` names.
 - **MUST NOT** answer `2xx` until the original target has, and **MUST** abort a streamed response
@@ -754,8 +773,9 @@ upstream. To its caller, it is a target. A relay:
 
 Gateways:
 
-- **MUST** bind an authenticated caller's principal to each `requestState` and `path` target they
-  return, by wrapping the value or keeping a record, and check it on use.
+- **MUST** bind an authenticated caller's principal to each `requestState` in a result to a
+  `tools/call` or a later request of its logical call, and each `path` target they return, by
+  wrapping the value or keeping a record, and check it on use.
 - **MUST NOT** forward their caller's credential upstream.
 - **MUST** return `isError: true` rather than pass a second upload request to their caller.
 - **MUST** replace every `path` target if they present more than one server at one MCP address.
