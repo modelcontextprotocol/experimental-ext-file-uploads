@@ -27,6 +27,10 @@ A client has two options for uploading a file:
 
 To download a file, the client fetches it from a download target that the tool lists in its result.
 
+A client that holds a download target can also pass it to another tool as the `source` of a file
+input. That tool's server fetches the bytes itself, so a file moves from one server to another
+without passing through the client.
+
 ## Specification
 
 This revision applies to tools. Resource behavior is unchanged from the base protocol.
@@ -70,6 +74,7 @@ Servers advertise the extension in the `server/discover` response:
     "extensions": {
       "io.modelcontextprotocol/files": {
         "upload": {},
+        "fetch": {},
         "maxInlineBytes": 1048576
       }
     }
@@ -82,6 +87,8 @@ The settings object has the following fields:
 - `upload` _(optional)_: The sender supports out-of-band uploads and the `upload_required` result
   type.
 - `download` _(optional, clients only)_: The client accepts download targets.
+- `fetch` _(optional, servers only)_: The server accepts a `FileInput` with `source` and fetches the
+  bytes itself, as [Server-Fetched Inputs](#server-fetched-inputs) describes.
 - `maxInlineBytes` _(optional, servers only)_: The largest total decoded size of inline `data`
   values the server accepts in one request. If `0` or absent, the server does not accept inline
   transfer.
@@ -96,6 +103,7 @@ Clients:
 - **MUST NOT** use this extension with a server that did not advertise it.
 - **MUST NOT** send inline `data` above `maxInlineBytes` in total, treating an absent value as `0`.
 - **MUST NOT** send a file out of band to a server that did not advertise `upload`.
+- **MUST NOT** send a `FileInput` with `source` to a server that did not advertise `fetch`.
 
 `maxInlineBytes` limits the total of all inline files in one request, and `x-mcp-file.maxSize`
 limits each file however it travels. A client can send a file inline if it fits within
@@ -158,6 +166,32 @@ sequenceDiagram
     H-->>M: Result, with no target
 ```
 
+A client passes a download target to another tool, whose server fetches the file:
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant H as Host and client
+    participant A as Server A
+    participant T as Target
+    participant B as Server B
+
+    M->>H: Call export_orders, then import_orders with the exported file
+    H->>A: tools/call export_orders
+    A-->>H: CallToolResult with download target in _meta
+    Note over H: User or operator policy approves sending the file to server B
+    H->>B: tools/call import_orders with file metadata and source
+    alt Rejected on metadata or source
+        B-->>H: CallToolResult {isError: true} or upload_required
+    else Accepted
+        B->>T: GET
+        T-->>B: 200 with bytes
+        Note over B: Check size and digest, then run the tool
+        B-->>H: CallToolResult
+    end
+    H-->>M: Results, with no target
+```
+
 ### File Arguments
 
 A server marks a file argument by adding `x-mcp-file` directly to the argument's object schema in
@@ -187,9 +221,26 @@ interface FileInput {
   digest?: { algorithm: "sha-256"; value: string /* base64url, no padding */ };
   /**
    * RFC 4648 base64-encoded file bytes. If absent and size is greater than 0, the client requests
-   * an out-of-band upload.
+   * an out-of-band upload, unless source is present.
    */
   data?: string;
+  /**
+   * A download target the server fetches the bytes from. Requires the server's fetch capability.
+   * See Server-Fetched Inputs.
+   */
+  source?: FileSource;
+}
+
+/** The transfer members of a DownloadTarget. name, mimeType, size, and digest are on FileInput. */
+interface FileSource {
+  /** Absolute https URL. */
+  url: string;
+  /** Headers the server sends with the GET. */
+  headers?: { [name: string]: string };
+  /** Only "omit" is allowed. */
+  credentials: "omit";
+  /** RFC 3339 timestamp with a time zone. Advisory latest start time for the fetch. */
+  expiresAt?: string;
 }
 ```
 
@@ -234,6 +285,14 @@ inline `data` and empty files. The `null` rule in [Targets](#targets) does not a
 Clients **MUST NOT** send a `data` member whose value is `null`, and servers treat one as
 undecodable inline `data`.
 
+A non-empty file has at most one of `data` and `source`. With neither, the client uploads the file
+out of band. With `source`, the server fetches it, as [Server-Fetched
+Inputs](#server-fetched-inputs) describes. Servers **MUST** reject a file that has both, as
+[Errors](#errors) specifies. A later
+revision may add other members that name where the bytes are, each behind a server capability.
+Servers **MUST** ignore members of a `FileInput` they do not recognize, unless the tool's schema
+forbids them.
+
 A file with `size` 0 has no bytes to transfer. Clients **MUST** omit `data` for it. Servers **MUST**
 treat a file with `size` 0 and no `data` as an empty file and **MUST NOT** issue a target for it.
 Servers **SHOULD** treat `size` 0 with an empty `data` string the same way, even without inline
@@ -253,6 +312,8 @@ Hosts:
   policy for model-supplied values.
 - **MUST NOT** place any target in model context, and **MUST NOT** place file bytes there to fill a
   `FileInput`.
+- **MAY** bind a download target they hold as the `source` of a file argument, under the same
+  approval as a file, and **MUST NOT** show it to the model.
 
 These rules apply to any file the host can read, including a file an agent created. This extension
 does not define how a host presents a result to the model.
@@ -663,9 +724,90 @@ Clients:
 
 Servers can return small files as embedded resources, as defined in the base protocol.
 
+### Server-Fetched Inputs
+
+A client that holds a download target for a file, for example one that another tool returned, can
+pass it to a tool as the `source` of a `FileInput` instead of fetching the bytes and uploading them.
+The server fetches the file from the source before it runs the tool. The bytes do not pass through
+the client. For this fetch, the server is the client in the sense of [Downloads](#downloads) and
+[Targets](#targets), and every client rule in those sections applies to it.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "import_orders",
+    "arguments": {
+      "dataset": "sales",
+      "file": {
+        "id": "file-1",
+        "name": "q3-orders.csv",
+        "mimeType": "text/csv",
+        "size": 209715200,
+        "digest": { "algorithm": "sha-256", "value": "..." },
+        "source": {
+          "url": "https://download.example.com/d/01JD3V9P4Q?sig=...",
+          "credentials": "omit",
+          "expiresAt": "2026-11-04T18:30:00Z"
+        }
+      }
+    }
+  }
+}
+```
+
+Before this call, the host **MUST** obtain the user's approval to send the file to this server, or
+apply operator policy when no user is present, as [Initial Call](#initial-call) requires. The
+approval **SHOULD** name the server that returned the target.
+
+Clients:
+
+- **MUST** copy `url`, `headers`, `credentials`, and `expiresAt` from the download target
+  unchanged, and **MUST** take `mimeType`, `size`, and `digest`, if present, from it.
+- **MUST NOT** use a `path` target, or a target with `credentials: "include"`, as a source. Only
+  an `omit` `url` target carries everything a third party needs.
+- **MUST NOT** send a source to a server on stdio.
+- **MUST NOT** place a source in model context, and **MAY** let the model name the file through a
+  host-defined handle, as [File Arguments](#file-arguments) describes.
+
+Servers:
+
+- **MUST** perform every check that does not require the bytes before fetching, as [Initial
+  Call](#initial-call) describes.
+- **MUST** reject a source that [Targets](#targets) would make a client reject, including under
+  [Addresses](#addresses) and [Redirects](#redirects), and **MUST** reject a source whose
+  `credentials` is not `"omit"`, before connecting.
+- **MUST NOT** attach their own credentials, cookies, client certificates, or platform-supplied
+  authentication to the fetch.
+- **SHOULD** restrict sources to an operator allowlist of origins, and **MUST** do so when no user
+  is present.
+- **MUST** fetch into a staging location as [Staging](#staging) describes, abort once the decoded
+  bytes exceed `size`, re-check size, inspect the bytes if the tool restricts type, and verify
+  `digest` if the file has one or the tool's schema requires it. They **MUST NOT** run the tool on
+  bytes they have not confirmed.
+- **MAY** answer a request with a source they will not or cannot fetch with an upload request, if
+  the request declared `upload` and the server advertised it. The upload request then lists every
+  non-empty file without `data`, including files with a source, and the client uploads them all.
+  Otherwise they **MUST** return `isError: true` without running the tool.
+- **SHOULD** start the fetch before `expiresAt`, and **SHOULD** use the [Tasks
+  extension](https://modelcontextprotocol.io/extensions/tasks/overview) if the fetch can outlast
+  the request.
+- **MUST** redact source URLs and headers as [Security Implications](#security-implications)
+  requires.
+
+A fetch that fails after it started is a failed check. The server **MUST NOT** run the tool, and
+**SHOULD** release the staged bytes.
+
+A server whose tools return files that clients will pass on **SHOULD** issue `omit` `url` download
+targets whose `expiresAt` leaves time for a further tool call before the fetch starts, and
+**SHOULD** include `digest`, so that the fetching server can verify the bytes.
+
 ### Targets
 
-These rules apply to every upload and download target. A member whose value is `null` is absent, and
+These rules apply to every upload target, download target, and source. For a source, the server
+that fetches it is the client. A member whose value is `null` is absent, and
 clients **MUST** ignore `_meta`. Header names are compared case-insensitively.
 
 Clients **MUST** reject a target that:
@@ -775,6 +917,10 @@ Gateways:
 - **MUST**, if they pass a `path` target through unchanged, route everything under that MCP address
   to that one server, and attach their own credential when the target has `credentials: "include"`.
 
+A gateway that forwards a `tools/call` with a source **MUST** forward the source unchanged. A relay
+that returned an `omit` `url` target to its caller can receive the fetch from a server instead of
+from its caller, and serves it as it would any client of that target.
+
 Operators **SHOULD NOT** enable this extension behind a gateway that does not implement it.
 
 ### Errors
@@ -790,6 +936,8 @@ principal apply to every retry from the one that answers an upload request onwar
 | Inline `data` is over `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
 | `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                        | JSON-RPC `-32602`                                                        |
 | Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                   | `isError: true`, without running the tool                                |
+| File has both `data` and `source`, or `source` has `credentials` other than `"omit"`                                                                                                        | `isError: true`, without running the tool                                |
+| Server will not or cannot fetch a source, or the fetch or a check on the bytes fails                                                                                                          | `upload_required` if the server chooses to and the request declared `upload`; otherwise `isError: true`, without running the tool |
 
 ## Backward Compatibility
 
@@ -813,6 +961,17 @@ without their own request-forgery defense. Whether a client sends the retry also
 whether every target accepted the request. Host approval happens before the target is known, so it
 does not cover this risk. Hosts **SHOULD** restrict `omit` targets to an allowlist of origins where
 an operator can provide one, and **SHOULD** do so for `form` targets in unattended use.
+
+### Client-Directed Fetches
+
+A source lets a client make a server send a `GET` of the client's choosing, from the server's
+network position. [Addresses](#addresses), the ban on credentials and platform-supplied
+authentication, the `size` bound, and an operator allowlist of source origins limit this to a
+bounded read of a public address. A malicious producing server can serve the fetching server bytes
+that differ from what the client saw; `digest` detects this, which is a reason for producers to
+include one. Delegation also tells the producing server, through its storage logs, that the
+fetching server acted on the file, and tells the fetching server the producing server's storage
+origin.
 
 ### Shared Origins
 
@@ -860,7 +1019,9 @@ The reference implementation will include a TypeScript SDK branch with the uploa
 client transfer helper, a reference server in front of an object store, and conformance scenarios
 for inline transfer, out-of-band transfer, a `form` target, target rejection, rejection on metadata,
 a failed transfer with no retry, a size mismatch, a consumed `requestState`, a second upload
-request, and a download.
+request, a download, a server-fetched input with `digest` verified, a source with
+`credentials: "include"` rejected, a source on an address that [Addresses](#addresses) forbids
+rejected, and a failed fetch answered with an upload request.
 
 ## Open Questions
 
@@ -887,6 +1048,15 @@ request, and a download.
    required digest would detect same-size replacement for every file, but it makes clients read each
    file twice, browsers cannot hash a large file natively, and most backends need a full server
    read. Should it be required?
+8. **Renewal.** A source copied from a download target expires with it, and a target cannot be
+   renewed. Should a server that returns files offer a way to renew a target, so that a fetch that
+   starts late, or a long one, can complete?
+9. **Credentialed sources.** Only `omit` `url` targets can be delegated. Should a later revision
+   let the fetching server present its own credential to the producing server's storage, for
+   example through token exchange or HTTP Message Signatures, so that producers that cannot issue
+   pre-authorized URLs can take part?
+10. **`path` sources.** Should a client be able to delegate an `omit` `path` target by resolving it
+    to a `url`?
 
 ## Future Work
 
