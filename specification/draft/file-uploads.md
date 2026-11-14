@@ -287,11 +287,13 @@ undecodable inline `data`.
 
 A non-empty file has at most one of `data` and `source`. With neither, the client uploads the file
 out of band. With `source`, the server fetches it, as [Server-Fetched
-Inputs](#server-fetched-inputs) describes. Servers **MUST** reject a file that has both, as
-[Errors](#errors) specifies. A later
-revision may add other members that name where the bytes are, each behind a server capability.
-Servers **MUST** ignore members of a `FileInput` they do not recognize, unless the tool's schema
-forbids them.
+Inputs](#server-fetched-inputs) describes. A server that advertises `fetch` **MUST** reject a file
+that has both, as [Errors](#errors) specifies. Clients **MUST NOT** send a `source` for a file
+with `size` 0.
+
+A later revision may add other members that name where the bytes are, each behind a server
+capability. Servers **MUST** ignore members of a `FileInput` they do not recognize, unless the
+tool's schema forbids them.
 
 A file with `size` 0 has no bytes to transfer. Clients **MUST** omit `data` for it. Servers **MUST**
 treat a file with `size` 0 and no `data` as an empty file and **MUST NOT** issue a target for it.
@@ -458,8 +460,9 @@ Servers:
 - **MUST** return an upload request only on `tools/call`, and only to a request that declared
   `upload`.
 - **MUST** make each `fileId` match one non-empty file argument without `data`.
-- **MUST** list every non-empty file argument without `data` in the upload request, each
-  `fileId` once.
+- **MUST** list every non-empty file argument that has neither `data` nor `source` in the upload
+  request, each `fileId` once, and **MAY** also list one with a `source`, as [Server-Fetched
+  Inputs](#server-fetched-inputs) describes.
 - **MUST** record in `requestState` that an upload request was issued, and carry that record
   into every later `requestState` of the logical call.
 - **MUST NOT** return an upload request on a retry whose `requestState` holds that record.
@@ -487,8 +490,8 @@ body. With `form`, the body is `multipart/form-data` as defined in [RFC
 
 Clients:
 
-- **MUST** fail the call unless the upload request lists each non-empty file without `data` exactly
-  once, and no other `fileId`.
+- **MUST** fail the call unless the upload request lists each non-empty file with neither `data`
+  nor `source` exactly once, a file with a `source` at most once, and no other `fileId`.
 - **MUST** fail the call if an upload request's `requestState` is absent, `null`, or not a string.
 - **MUST** support `form` targets if they declare `upload`.
 - **MUST** send each entry in a `form` target's `fields` as one part, in array order, then send the
@@ -729,8 +732,9 @@ Servers can return small files as embedded resources, as defined in the base pro
 A client that holds a download target for a file, for example one that another tool returned, can
 pass it to a tool as the `source` of a `FileInput` instead of fetching the bytes and uploading them.
 The server fetches the file from the source before it runs the tool. The bytes do not pass through
-the client. For this fetch, the server is the client in the sense of [Downloads](#downloads) and
-[Targets](#targets), and every client rule in those sections applies to it.
+the client. For this fetch, the server is the client in the sense of [Targets](#targets), and every
+client rule there applies to it. It sends the `GET` and reads the response as
+[Downloads](#downloads) describes.
 
 ```json
 {
@@ -768,37 +772,45 @@ Clients:
   unchanged, and **MUST** take `mimeType`, `size`, and `digest`, if present, from it.
 - **MUST NOT** use a `path` target, or a target with `credentials: "include"`, as a source. Only
   an `omit` `url` target carries everything a third party needs.
-- **MUST NOT** send a source to a server on stdio.
 - **MUST NOT** place a source in model context, and **MAY** let the model name the file through a
   host-defined handle, as [File Arguments](#file-arguments) describes.
+- **MUST**, if an upload request lists a file with a source, either fetch the file themselves as
+  [Downloads](#downloads) describes and upload it, or abandon the call as [Transfer](#transfer)
+  describes. The retry repeats the arguments unchanged, including `source`.
 
 Servers:
 
 - **MUST** perform every check that does not require the bytes before fetching, as [Initial
   Call](#initial-call) describes.
-- **MUST** reject a source that [Targets](#targets) would make a client reject, including under
-  [Addresses](#addresses) and [Redirects](#redirects), and **MUST** reject a source whose
-  `credentials` is not `"omit"`, before connecting.
+- **MUST** decline, without connecting, a source that [Targets](#targets) would make a client
+  reject, or whose `credentials` is not `"omit"`.
+- **MAY** decline any other source, and **SHOULD** restrict sources to an operator allowlist of
+  origins.
 - **MUST NOT** attach their own credentials, cookies, client certificates, or platform-supplied
   authentication to the fetch.
-- **SHOULD** restrict sources to an operator allowlist of origins, and **MUST** do so when no user
-  is present.
 - **MUST** fetch into a staging location as [Staging](#staging) describes, abort once the decoded
   bytes exceed `size`, re-check size, inspect the bytes if the tool restricts type, and verify
-  `digest` if the file has one or the tool's schema requires it. They **MUST NOT** run the tool on
-  bytes they have not confirmed.
-- **MAY** answer a request with a source they will not or cannot fetch with an upload request, if
-  the request declared `upload` and the server advertised it. The upload request then lists every
-  non-empty file without `data`, including files with a source, and the client uploads them all.
-  Otherwise they **MUST** return `isError: true` without running the tool.
+  `digest` if the tool's schema requires it. They **SHOULD** verify a `digest` that is present,
+  because the server reads every byte during the fetch. They **MUST NOT** run the tool on bytes
+  they have not confirmed.
+- **MAY** list a file whose source they declined, or whose fetch failed, in an upload request, if
+  the request declared `upload`, the server advertised it, and the logical call has had no upload
+  request. The server then uses the uploaded bytes and ignores `source`. Otherwise it **MUST**
+  return `isError: true` without running the tool.
+- **SHOULD**, in a call that needs an upload request for other files, attempt the fetch before
+  returning the upload request, so that the request can list a file whose fetch failed, and
+  **MUST** complete it by step 3 of [Retry](#retry).
 - **SHOULD** start the fetch before `expiresAt`, and **SHOULD** use the [Tasks
   extension](https://modelcontextprotocol.io/extensions/tasks/overview) if the fetch can outlast
   the request.
 - **MUST** redact source URLs and headers as [Security Implications](#security-implications)
   requires.
 
-A fetch that fails after it started is a failed check. The server **MUST NOT** run the tool, and
-**SHOULD** release the staged bytes.
+Fetched bytes that fail a check are handled as for any file. The server **MUST NOT** run the tool,
+and **SHOULD** release the staged bytes.
+
+A source is always an `omit` `url` target, the only kind that [stdio](#stdio) allows. A server on
+stdio can advertise `fetch`, and a target that a server on stdio returned can be a source.
 
 A server whose tools return files that clients will pass on **SHOULD** issue `omit` `url` download
 targets whose `expiresAt` leaves time for a further tool call before the fetch starts, and
@@ -917,9 +929,12 @@ Gateways:
 - **MUST**, if they pass a `path` target through unchanged, route everything under that MCP address
   to that one server, and attach their own credential when the target has `credentials: "include"`.
 
-A gateway that forwards a `tools/call` with a source **MUST** forward the source unchanged. A relay
-that returned an `omit` `url` target to its caller can receive the fetch from a server instead of
-from its caller, and serves it as it would any client of that target.
+A gateway that receives a file with a source **MAY** forward it unchanged to a server that
+advertised `fetch`, fetch the file and send it upstream itself, or reject the call. It **MUST**
+advertise `fetch` to its caller only if the server advertised it or the gateway fetches sources
+itself. The server fetches a forwarded source directly, so the bytes do not pass through the
+gateway. A relay that returned an `omit` `url` download target can receive its `GET` from a server
+instead of from the relay's caller.
 
 Operators **SHOULD NOT** enable this extension behind a gateway that does not implement it.
 
@@ -931,13 +946,14 @@ principal apply to every retry from the one that answers an upload request onwar
 
 | Condition                                                                                                                                                                                   | Response                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Non-empty file omits `data`, server has `upload`, request did not declare it                                                                                                                | `-32021` with `data.requiredCapabilities` listing the missing capability |
+| Non-empty file omits `data` and `source`, server has `upload`, request did not declare it                                                                                                   | `-32021` with `data.requiredCapabilities` listing the missing capability |
 | Server knows the tool can only return a download, request did not declare `download`                                                                                                        | `-32021` as above, before running the tool                               |
 | Inline `data` is over `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
 | `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                        | JSON-RPC `-32602`                                                        |
 | Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                   | `isError: true`, without running the tool                                |
-| File has both `data` and `source`, or `source` has `credentials` other than `"omit"`                                                                                                        | `isError: true`, without running the tool                                |
-| Server will not or cannot fetch a source, or the fetch or a check on the bytes fails                                                                                                          | `upload_required` if the server chooses to and the request declared `upload`; otherwise `isError: true`, without running the tool |
+| A server with `fetch` receives a non-empty file that has both `data` and `source`                                                                                                           | `isError: true`, without running the tool                                |
+| Server declines a source or its fetch fails; the request declared `upload`, the server advertises it, and the logical call has had no upload request                                        | An upload request that lists the file, or `isError: true`                |
+| Server declines a source or its fetch fails, in any other case                                                                                                                              | `isError: true`, without running the tool                                |
 
 ## Backward Compatibility
 
@@ -965,13 +981,19 @@ an operator can provide one, and **SHOULD** do so for `form` targets in unattend
 ### Client-Directed Fetches
 
 A source lets a client make a server send a `GET` of the client's choosing, from the server's
-network position. [Addresses](#addresses), the ban on credentials and platform-supplied
-authentication, the `size` bound, and an operator allowlist of source origins limit this to a
-bounded read of a public address. A malicious producing server can serve the fetching server bytes
-that differ from what the client saw; `digest` detects this, which is a reason for producers to
-include one. Delegation also tells the producing server, through its storage logs, that the
-fetching server acted on the file, and tells the fetching server the producing server's storage
-origin.
+network position. No user approves that request, and the host's approval covers the file, not the
+address the server contacts. [Addresses](#addresses), the ban on credentials and platform-supplied
+authentication, the `size` bound, and an operator allowlist of source origins limit it to a bounded
+read of a public address.
+
+A malicious producing server can serve the fetching server bytes that differ from what it would
+serve the client. `digest` detects this, which is a reason for producers to include one. Delegation
+also tells the producing server, through its storage logs, that the fetching server acted on the
+file, and tells the fetching server the producing server's storage origin.
+
+A file passed as a source does not pass through the host, or through a gateway that forwards the
+source, so scanning or policy they apply to transferred bytes does not see it. A host or gateway
+that has to inspect the bytes fetches the file and uploads it instead.
 
 ### Shared Origins
 
@@ -1020,8 +1042,8 @@ client transfer helper, a reference server in front of an object store, and conf
 for inline transfer, out-of-band transfer, a `form` target, target rejection, rejection on metadata,
 a failed transfer with no retry, a size mismatch, a consumed `requestState`, a second upload
 request, a download, a server-fetched input with `digest` verified, a source with
-`credentials: "include"` rejected, a source on an address that [Addresses](#addresses) forbids
-rejected, and a failed fetch answered with an upload request.
+`credentials: "include"` declined, a source on an address that [Addresses](#addresses) forbids
+declined, and a failed fetch answered with an upload request.
 
 ## Open Questions
 
