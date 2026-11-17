@@ -1,0 +1,17 @@
+{
+  "name": "@modelcontextprotocol/files-reference-implementation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference implementation of the File Uploads and Downloads Extension (io.modelcontextprotocol/files)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "tsx test/conformance.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
