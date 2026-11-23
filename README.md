@@ -18,6 +18,8 @@ The client uploads the bytes and retries with unchanged arguments. A tool return
 The draft is in [`specification/draft/file-uploads.md`](specification/draft/file-uploads.md).
 The reference implementation will live in this repository.
 
+Run the [File Uploads conformance tests](conformance/README.md) from this checkout.
+
 ## Background
 
 - [Working group meeting notes, October 2, 2026](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3412)
