@@ -254,7 +254,10 @@ interface FileInput {
   source?: FileSource;
 }
 
-/** The transfer members of a DownloadTarget. name, mimeType, size, and digest are on FileInput. */
+/**
+ * The transfer members of an `omit` `url` DownloadTarget. `name`, `mimeType`, `size`, and `digest`
+ * are on FileInput; fetches never send credentials.
+ */
 interface FileSource {
   /** Absolute https URL. */
   url: string;
@@ -263,8 +266,6 @@ interface FileSource {
    * If-Unmodified-Since are allowed (case-insensitive).
    */
   headers?: { [name: string]: string };
-  /** Only "omit" is allowed. */
-  credentials: "omit";
   /** RFC 3339 timestamp with a time zone. Advisory latest start time for the fetch. */
   expiresAt?: string;
 }
@@ -833,7 +834,6 @@ client rule there applies to it. It sends the `GET` and reads the response as
         "digest": { "algorithm": "sha-256", "value": "..." },
         "source": {
           "url": "https://download.example.com/d/01JD3V9P4Q?sig=...",
-          "credentials": "omit",
           "expiresAt": "2026-11-04T18:30:00Z"
         }
       }
@@ -848,8 +848,8 @@ approval **SHOULD** name the server that returned the target.
 
 Clients:
 
-- **MUST** copy `url`, `headers`, `credentials`, and `expiresAt` from the download target
-  unchanged, and **MUST** take `mimeType`, `size`, and `digest`, if present, from it.
+- **MUST** copy `url`, `headers`, and `expiresAt` from the download target unchanged, and **MUST**
+  take `mimeType`, `size`, and `digest`, if present, from it.
 - **MUST NOT** use a `path` target, a target with `credentials: "include"`, or a target whose
   `headers` violate [Allowed Source Headers](#allowed-source-headers) as a source. Only a
   self-authorized `omit` `url` target can be passed to a third party.
@@ -866,8 +866,8 @@ Servers:
 - **MUST** perform every check that does not require the bytes before fetching, as [Initial
   Call](#initial-call) describes.
 - **MUST** decline, without connecting, a source that [Targets](#targets) would make a client
-  reject, whose `credentials` is not `"omit"`, whose `headers` violate [Allowed Source
-  Headers](#allowed-source-headers), or that fails the server's domain policy.
+  reject, whose `headers` violate [Allowed Source Headers](#allowed-source-headers), or that fails
+  the server's domain policy.
 - **MAY** decline any other source, and **SHOULD** restrict sources to an operator allowlist of
   domains and advertise it in `fetch.allowedDomains` (and `x-mcp-file.allowedDomains` when a tool
   has a narrower policy).
@@ -894,8 +894,8 @@ Servers:
 Fetched bytes that fail a check are handled as for any file. The server **MUST NOT** run the tool,
 and **SHOULD** release the staged bytes.
 
-A source is always an `omit` `url` target, the only kind that [stdio](#stdio) allows. A server on
-stdio can advertise `fetch`, and a target that a server on stdio returned can be a source.
+A source is always copied from an `omit` `url` target, the only kind that [stdio](#stdio) allows. A
+server on stdio can advertise `fetch`, and a target that a server on stdio returned can be a source.
 
 A server whose tools return files that clients will pass on **SHOULD** issue `omit` `url` download
 targets scoped to read-only access for that single file, **SHOULD** omit `headers` or use only
@@ -1017,8 +1017,8 @@ Servers **MUST NOT** include a target in a result's `content` or `structuredCont
 #### Credentials
 
 With `include`, clients **MUST** attach the `Authorization` credential they send on MCP requests to
-that MCP address, and no other. With `omit`, clients **MUST NOT** attach that credential, cookies,
-client certificates, or platform-supplied authentication.
+that MCP address, and no other. With `omit`, or on a `FileSource`, clients **MUST NOT** attach that
+credential, cookies, client certificates, or platform-supplied authentication.
 
 Clients **MUST** honor `include` only on a `path` target, or when `url` has the same [RFC
 6454](https://www.rfc-editor.org/rfc/rfc6454) origin as the server's [canonical
@@ -1220,9 +1220,9 @@ client transfer helper, a reference server in front of an object store, and conf
 for inline transfer, out-of-band transfer, a `form` target, target rejection, rejection on metadata,
 a failed transfer with no retry, a size mismatch, a consumed `requestState`, a second upload
 request, a download (including `maxInlineBytes: 0` returning a download target instead of an inline
-blob), a server-fetched input with `digest` verified, a source with `credentials: "include"`
-declined, a source on an address that [Addresses](#addresses) forbids declined, a source on a domain
-outside `allowedDomains` declined, a source with a header outside [Allowed Source
+blob), a server-fetched input with `digest` verified, a source with an unrecognized member (such as
+`credentials`) declined, a source on an address that [Addresses](#addresses) forbids declined, a
+source on a domain outside `allowedDomains` declined, a source with a header outside [Allowed Source
 Headers](#allowed-source-headers) declined, and a failed fetch answered with an upload request.
 
 ## Open Questions
