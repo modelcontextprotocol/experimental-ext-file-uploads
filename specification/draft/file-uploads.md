@@ -74,7 +74,9 @@ Servers advertise the extension in the `server/discover` response:
     "extensions": {
       "io.modelcontextprotocol/files": {
         "upload": {},
-        "fetch": {},
+        "fetch": {
+          "allowedDomains": ["download.example.com", "*.storage.example.com"]
+        },
         "maxInlineBytes": 1048576
       }
     }
@@ -88,10 +90,14 @@ The settings object has the following fields:
   type.
 - `download` _(optional, clients only)_: The client accepts download targets.
 - `fetch` _(optional, servers only)_: The server accepts a `FileInput` with `source` and fetches the
-  bytes itself, as [Server-Fetched Inputs](#server-fetched-inputs) describes.
-- `maxInlineBytes` _(optional, servers only)_: The largest total decoded size of inline `data`
-  values the server accepts in one request. If `0` or absent, the server does not accept inline
-  transfer.
+  bytes itself, as [Server-Fetched Inputs](#server-fetched-inputs) describes. **MAY** include
+  `allowedDomains`, an array of domain patterns restricting which `source` hosts the server accepts,
+  as [Allowed Fetch Domains](#allowed-fetch-domains) specifies.
+- `maxInlineBytes` _(optional)_: Non-negative integer. On a server, the largest total decoded size
+  of inline `data` values the server accepts in one request; if `0` or absent, the server does not
+  accept inline uploads. On a client that declares `download`, the largest total decoded size of
+  inline file content (such as embedded resources) the client wants in one tool result; if `0`, the
+  client asks for download targets instead of inline blobs, and if absent, the server chooses.
 - `revision` _(optional)_: A string that changes when a revision of this extension makes a breaking
   change. Absent means the initial revision. A peer that receives a `revision` it does not know
   **SHOULD NOT** enable the extension.
@@ -101,18 +107,30 @@ Receivers **MUST** ignore fields they do not recognize in these settings.
 Clients:
 
 - **MUST NOT** use this extension with a server that did not advertise it.
-- **MUST NOT** send inline `data` above `maxInlineBytes` in total, treating an absent value as `0`.
+- **MUST NOT** send inline `data` above the server's `maxInlineBytes` in total, treating an absent
+  value as `0`.
 - **MUST NOT** send a file out of band to a server that did not advertise `upload`.
-- **MUST NOT** send a `FileInput` with `source` to a server that did not advertise `fetch`.
+- **MUST NOT** send a `FileInput` with `source` to a server that did not advertise `fetch`, or whose
+  URL does not match any `allowedDomains` advertised in `fetch` or `x-mcp-file`.
 
-`maxInlineBytes` limits the total of all inline files in one request, and `x-mcp-file.maxSize`
-limits each file however it travels. A client can send a file inline if it fits within
-`maxInlineBytes`, and sends the rest out of band if the server advertises `upload`. With `upload`, a
-`maxInlineBytes` of 1 MiB, and a `maxSize` of 150 MiB, a 200 KiB file can go inline, a 40 MiB file
-goes out of band, and a 200 MiB file is rejected. A server with `upload` and no `maxInlineBytes`
-accepts files only out of band. A client need not declare the extension on an inline `tools/call`.
-An inline-only client declares empty settings on `tools/list`. Servers **MUST NOT** reject inline
-`data` because a request did not declare the extension.
+A server's `maxInlineBytes` limits the total of all inline files in one request, and
+`x-mcp-file.maxSize` limits each file however it travels. A client can send a file inline if it fits
+within the server's `maxInlineBytes`, and sends the rest out of band if the server advertises
+`upload`. With `upload`, a `maxInlineBytes` of 1 MiB, and a `maxSize` of 150 MiB, a 200 KiB file can
+go inline, a 40 MiB file goes out of band, and a 200 MiB file is rejected. A server with `upload`
+and no `maxInlineBytes` accepts files only out of band. A client need not declare the extension on a
+`tools/call` whose files all use inline `data` or `source`, when it does not need upload or download
+targets. A client that sends only inline `data` or `source` declares empty settings on `tools/list`.
+Servers **MUST NOT** reject inline `data` or `source` because a request did not declare the
+extension.
+
+A client's `maxInlineBytes` expresses how much inline file content (such as embedded resources) it
+wants in a tool result when `download` is declared; it does not apply to text descriptions in
+`content`. Setting `maxInlineBytes` to `0` lets an agentic client tell a server that it wants file
+outputs as download targets rather than inline blobs, for example when the client plans to pass the
+target on to another server as a `FileInput.source`. Servers **MUST** ignore a client's
+`maxInlineBytes` on requests that did not declare `download`. See [Downloads](#downloads) for an
+example.
 
 ### Flow
 
@@ -207,6 +225,11 @@ interface FileInputDescriptor {
   accept?: string[];
   /** Maximum decoded size of each file in bytes, for inline and out-of-band transfer. */
   maxSize?: number;
+  /**
+   * Domain patterns allowed for FileInput.source on this argument. Narrows fetch.allowedDomains
+   * when both are present. See Allowed Fetch Domains.
+   */
+  allowedDomains?: string[];
 }
 
 interface FileInput {
@@ -235,7 +258,10 @@ interface FileInput {
 interface FileSource {
   /** Absolute https URL. */
   url: string;
-  /** Headers the server sends with the GET. */
+  /**
+   * Headers the server sends with the GET. Only Accept, Accept-Language, If-Match, and
+   * If-Unmodified-Since are allowed (case-insensitive).
+   */
   headers?: { [name: string]: string };
   /** Only "omit" is allowed. */
   credentials: "omit";
@@ -642,6 +668,33 @@ can trigger, such as a commit, counts as the target writing where that step writ
 > **Note**: The working group has discussed downloads but has not reviewed this shape. See [Open
 > Questions](#open-questions).
 
+A client declares `download` on `tools/call` to accept download targets. Setting `maxInlineBytes`
+alongside `download` tells the server how much inline file content (such as embedded resources) the
+client wants in the result; setting it to `0` expresses the client's intent to receive file outputs
+as download targets rather than inline blobs:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "export_orders",
+    "arguments": { "quarter": "2026-Q3" },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/files": {
+            "download": {},
+            "maxInlineBytes": 0
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 A tool returns files by listing them in the `_meta` of its `CallToolResult`, under the extension
 identifier, with one entry per file. The server **MUST** also describe the result in `content`:
 
@@ -725,9 +778,36 @@ Clients:
   policy permits. A target cannot be renewed.
 - **MUST NOT** repeat the call automatically.
 
-Servers can return small files as embedded resources, as defined in the base protocol.
+When a tool can return a file either as an embedded resource (as defined in the base protocol) or as
+a download target, servers **SHOULD** return files as download targets when returning them inline
+would exceed the client's `maxInlineBytes` in total (any non-empty file when `maxInlineBytes` is
+`0`). If the client omits `maxInlineBytes`, the server chooses which small files to return as
+embedded resources. Because `io.modelcontextprotocol/clientCapabilities` is sent per request, a
+client can set `maxInlineBytes` to `0` on calls whose output it intends to save locally or pass to
+another tool as a `source`, while omitting it or using a larger limit on other calls. Servers
+**MUST** ignore a client's `maxInlineBytes` if the request did not declare `download`.
 
 ### Server-Fetched Inputs
+
+#### Motivation
+
+Without server-fetched inputs, passing one tool's output file as another tool's input requires the
+client to download the bytes from server A's target and upload them to server B. For large files,
+such as an agent exporting a 200 MB order table from one data warehouse and loading it into another,
+that doubles network transfer, requires local scratch storage a host or sandbox may not have, and
+puts the host in the data path when it has no need to read the bytes.
+
+Server-fetched inputs let the consuming server pull the bytes directly instead of having the
+producing server push them. Pulling keeps ingestion, staging, size enforcement, and digest checks on
+the consuming server, where [Uploads](#uploads) already puts them, while the producing server only
+returns an ordinary `DownloadTarget`. Because the client already holds that target when calling the
+consuming tool, placing it in `FileInput.source` needs no extra round trip and no `requestState`.
+Using a typed `FileInput` member rather than an opaque URL string lets hosts enforce approval policy
+and keep the URL out of model context, lets gateways inspect or intercept the transfer, and applies
+[Targets](#targets) rules uniformly. Restricting sources to `omit` `url` targets keeps client MCP
+credentials from crossing between servers.
+
+#### Request and Fetch
 
 A client that holds a download target for a file, for example one that another tool returned, can
 pass it to a tool as the `source` of a `FileInput` instead of fetching the bytes and uploading them.
@@ -770,8 +850,11 @@ Clients:
 
 - **MUST** copy `url`, `headers`, `credentials`, and `expiresAt` from the download target
   unchanged, and **MUST** take `mimeType`, `size`, and `digest`, if present, from it.
-- **MUST NOT** use a `path` target, or a target with `credentials: "include"`, as a source. Only
-  an `omit` `url` target carries everything a third party needs.
+- **MUST NOT** use a `path` target, a target with `credentials: "include"`, or a target whose
+  `headers` violate [Allowed Source Headers](#allowed-source-headers) as a source. Only a
+  self-authorized `omit` `url` target can be passed to a third party.
+- **MUST NOT** send a `source` whose URL does not match any `allowedDomains` advertised in `fetch`
+  or `x-mcp-file`, as [Allowed Fetch Domains](#allowed-fetch-domains) specifies.
 - **MUST NOT** place a source in model context, and **MAY** let the model name the file through a
   host-defined handle, as [File Arguments](#file-arguments) describes.
 - **MUST**, if an upload request lists a file with a source, either fetch the file themselves as
@@ -783,9 +866,11 @@ Servers:
 - **MUST** perform every check that does not require the bytes before fetching, as [Initial
   Call](#initial-call) describes.
 - **MUST** decline, without connecting, a source that [Targets](#targets) would make a client
-  reject, or whose `credentials` is not `"omit"`.
+  reject, whose `credentials` is not `"omit"`, whose `headers` violate [Allowed Source
+  Headers](#allowed-source-headers), or that fails the server's domain policy.
 - **MAY** decline any other source, and **SHOULD** restrict sources to an operator allowlist of
-  origins.
+  domains and advertise it in `fetch.allowedDomains` (and `x-mcp-file.allowedDomains` when a tool
+  has a narrower policy).
 - **MUST NOT** attach their own credentials, cookies, client certificates, or platform-supplied
   authentication to the fetch.
 - **MUST** fetch into a staging location as [Staging](#staging) describes, abort once the decoded
@@ -813,8 +898,90 @@ A source is always an `omit` `url` target, the only kind that [stdio](#stdio) al
 stdio can advertise `fetch`, and a target that a server on stdio returned can be a source.
 
 A server whose tools return files that clients will pass on **SHOULD** issue `omit` `url` download
-targets whose `expiresAt` leaves time for a further tool call before the fetch starts, and
-**SHOULD** include `digest`, so that the fetching server can verify the bytes.
+targets scoped to read-only access for that single file, **SHOULD** omit `headers` or use only
+headers from [Allowed Source Headers](#allowed-source-headers), **SHOULD** choose an `expiresAt`
+that leaves time for a further tool call before the fetch starts, and **SHOULD** include `digest`,
+so that the fetching server can verify the bytes.
+
+#### Allowed Fetch Domains
+
+A server that restricts which hosts it fetches from can advertise its allowlist during capability
+negotiation in `fetch.allowedDomains`, and can narrow it for a specific file argument during tool
+discovery in `x-mcp-file.allowedDomains`. For example, a server may allow fetches from GCS and S3
+in `server/discover` while restricting a specific tool argument to GCS only in `tools/list`:
+
+```json
+{
+  "name": "load_gcs_orders",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "file": {
+        "type": "object",
+        "x-mcp-file": {
+          "accept": ["text/csv", "application/vnd.apache.parquet"],
+          "maxSize": 536870912,
+          "allowedDomains": ["storage.googleapis.com", "*.storage.googleapis.com"]
+        },
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "name": { "type": "string" },
+          "mimeType": { "type": "string" },
+          "size": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["id", "mimeType", "size"]
+      }
+    },
+    "required": ["file"]
+  }
+}
+```
+
+Each entry in `allowedDomains` is a lowercase ASCII domain pattern: either an exact DNS host name of
+at least two labels (such as `storage.googleapis.com`) or a leading wildcard `*.` followed by a DNS
+suffix of at least two labels (such as `*.storage.googleapis.com` or
+`*.s3.us-east-1.amazonaws.com`). Entries **MUST NOT** contain a scheme, port, path, userinfo, IP
+literal, bare `*`, or wildcard outside the leading `*.`. Servers **SHOULD NOT** advertise a public
+suffix or a broad multi-tenant domain (such as `*.amazonaws.com`).
+
+Matching compares case-insensitively against the source URL's serialized ASCII host per [WHATWG
+URL](https://url.spec.whatwg.org/#concept-host-serializer) and requires `https` on the default port
+(`443` or omitted):
+
+- An exact entry matches only the identical host.
+- A `*.<suffix>` entry matches any host ending in `.<suffix>` (one or more subdomain labels, not
+  `<suffix>` itself).
+- Clients and servers **MUST** treat any entry that does not match this syntax as matching no host.
+
+If both `fetch.allowedDomains` and `x-mcp-file.allowedDomains` are present, a source URL **MUST**
+match both (`x-mcp-file.allowedDomains` narrows `fetch.allowedDomains`; it cannot widen it).
+`x-mcp-file.allowedDomains` applies only when the server advertises `fetch`. An empty array `[]`
+matches no host, disabling `source` for that server or argument. If `allowedDomains` is absent from
+both, the server does not advertise an allowlist, though it **MAY** still enforce an internal policy
+and decline sources that fail it.
+
+Advertising `allowedDomains` lets clients skip delegation and fall back to download and upload
+without a failed call. It is advisory for client planning: servers **MUST** still enforce their
+domain allowlist on every `tools/call` and **MUST NOT** rely on client filtering.
+
+#### Allowed Source Headers
+
+Because a `FileSource` causes a server to issue a `GET` controlled by a client, `FileSource.headers`
+uses a fixed allowlist rather than permitting arbitrary headers. Only the following header names are
+allowed on a `FileSource` (compared case-insensitively, each at most once):
+
+- `Accept`
+- `Accept-Language`
+- `If-Match`
+- `If-Unmodified-Since`
+
+Every header value **MUST** still be valid under [RFC
+9110](https://www.rfc-editor.org/rfc/rfc9110#section-5), as [Targets](#targets) requires. Clients
+**MUST NOT** pass a download target as a `source` if its `headers` include any name outside this
+set or repeat an allowed name under different casing, and **MUST NOT** strip headers from a target
+to make it fit; instead, the client downloads the file itself and uploads it if needed. Servers
+**MUST** decline, without connecting, any `source` whose `headers` include a name outside this set
+or repeat an allowed name under different casing.
 
 ### Targets
 
@@ -840,6 +1007,8 @@ Clients **MUST** reject a target that:
    `Content-Encoding`, `Content-Range`, `Content-Digest`, or `Repr-Digest`; its `fileField` or a
    field `name` is empty or contains a control character, `"`, or `\`; a field `name` equals
    `fileField`; or a field `value` contains a CR, LF, or NUL character.
+6. Is a `FileSource`, and has `headers` that include a name outside [Allowed Source
+   Headers](#allowed-source-headers) or repeat an allowed name under different casing.
 
 An operator allowlist **MAY** permit an `http` `url` on loopback. Clients **MUST** treat a `401` or
 `403` from a target as a failed transfer, and **MUST NOT** start authorization discovery from it.
@@ -907,8 +1076,8 @@ itself, or reject it. A relay is a client of the original target, so every clien
 upstream. To its caller, it is a target. A relay:
 
 - **MUST** declare to the server only the `upload` and `download` settings it implements and its
-  caller declared, and **MUST** advertise `upload` to its caller only if it implements it and the
-  server advertised it.
+  caller declared (forwarding the caller's `maxInlineBytes` for downloads, or a smaller limit), and
+  **MUST** advertise `upload` to its caller only if it implements it and the server advertised it.
 - **MUST** present a `form` target without `form`, and build the multipart body from the `FileInput`
   that `fileId` names.
 - **MUST NOT** answer `2xx` until the original target has, and **MUST** abort a streamed response
@@ -932,7 +1101,10 @@ Gateways:
 A gateway that receives a file with a source **MAY** forward it unchanged to a server that
 advertised `fetch`, fetch the file and send it upstream itself, or reject the call. It **MUST**
 advertise `fetch` to its caller only if the server advertised it or the gateway fetches sources
-itself. The server fetches a forwarded source directly, so the bytes do not pass through the
+itself. A gateway that forwards sources unchanged **MUST** pass through the server's
+`fetch.allowedDomains` and `x-mcp-file.allowedDomains`, or narrow them to match its own policy, and
+**MUST NOT** widen them; a gateway that fetches sources itself advertises its own `allowedDomains`,
+if any. The server fetches a forwarded source directly, so the bytes do not pass through the
 gateway. A relay that returned an `omit` `url` download target can receive its `GET` from a server
 instead of from the relay's caller.
 
@@ -944,16 +1116,16 @@ Servers **MUST** respond as shown. Conditions on `requestState`, the tool name, 
 principal apply to every retry from the one that answers an upload request onward. `-32021` is
 [`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/2026-07-28/schema#missingrequiredclientcapabilityerror).
 
-| Condition                                                                                                                                                                                   | Response                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Non-empty file omits `data` and `source`, server has `upload`, request did not declare it                                                                                                   | `-32021` with `data.requiredCapabilities` listing the missing capability |
-| Server knows the tool can only return a download, request did not declare `download`                                                                                                        | `-32021` as above, before running the tool                               |
-| Inline `data` is over `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
-| `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                        | JSON-RPC `-32602`                                                        |
-| Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                   | `isError: true`, without running the tool                                |
-| A server with `fetch` receives a non-empty file that has both `data` and `source`                                                                                                           | `isError: true`, without running the tool                                |
-| Server declines a source or its fetch fails; the request declared `upload`, the server advertises it, and the logical call has had no upload request                                        | An upload request that lists the file, or `isError: true`                |
-| Server declines a source or its fetch fails, in any other case                                                                                                                              | `isError: true`, without running the tool                                |
+| Condition                                                                                                                                                                                                | Response                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Non-empty file omits `data` and `source`, server has `upload`, request did not declare it                                                                                                                | `-32021` with `data.requiredCapabilities` listing the missing capability |
+| Server knows the tool can only return a download, request did not declare `download`                                                                                                                     | `-32021` as above, before running the tool                               |
+| Inline `data` is over the server's `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
+| `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                                     | JSON-RPC `-32602`                                                        |
+| Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                                | `isError: true`, without running the tool                                |
+| A server with `fetch` receives a non-empty file that has both `data` and `source`                                                                                                                        | `isError: true`, without running the tool                                |
+| Server declines a source or its fetch fails; the request declared `upload`, the server advertises it, and the logical call has had no upload request                                                     | An upload request that lists the file, or `isError: true`                |
+| Server declines a source or its fetch fails, in any other case                                                                                                                                           | `isError: true`, without running the tool                                |
 
 ## Backward Compatibility
 
@@ -983,8 +1155,14 @@ an operator can provide one, and **SHOULD** do so for `form` targets in unattend
 A source lets a client make a server send a `GET` of the client's choosing, from the server's
 network position. No user approves that request, and the host's approval covers the file, not the
 address the server contacts. [Addresses](#addresses), the ban on credentials and platform-supplied
-authentication, the `size` bound, and an operator allowlist of source origins limit it to a bounded
-read of a public address.
+authentication, the `size` bound, the fixed header allowlist in [Allowed Source
+Headers](#allowed-source-headers), and an operator domain allowlist ([Allowed Fetch
+Domains](#allowed-fetch-domains)) limit it to a bounded read of a permitted public host.
+Restricting `FileSource.headers` to a fixed set of safe `GET` headers prevents a client from
+injecting authentication, proxy-routing, or cloud-metadata headers into the server's outbound
+request. Advertising `allowedDomains` helps clients avoid failed calls, but servers **MUST** still
+enforce their own allowlist on every call and **SHOULD NOT** advertise overly broad wildcard
+domains.
 
 A malicious producing server can serve the fetching server bytes that differ from what it would
 serve the client. `digest` detects this, which is a reason for producers to include one. Delegation
@@ -1041,9 +1219,11 @@ The reference implementation will include a TypeScript SDK branch with the uploa
 client transfer helper, a reference server in front of an object store, and conformance scenarios
 for inline transfer, out-of-band transfer, a `form` target, target rejection, rejection on metadata,
 a failed transfer with no retry, a size mismatch, a consumed `requestState`, a second upload
-request, a download, a server-fetched input with `digest` verified, a source with
-`credentials: "include"` declined, a source on an address that [Addresses](#addresses) forbids
-declined, and a failed fetch answered with an upload request.
+request, a download (including `maxInlineBytes: 0` returning a download target instead of an inline
+blob), a server-fetched input with `digest` verified, a source with `credentials: "include"`
+declined, a source on an address that [Addresses](#addresses) forbids declined, a source on a domain
+outside `allowedDomains` declined, a source with a header outside [Allowed Source
+Headers](#allowed-source-headers) declined, and a failed fetch answered with an upload request.
 
 ## Open Questions
 
