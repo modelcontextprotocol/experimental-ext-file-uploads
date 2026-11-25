@@ -488,8 +488,8 @@ Servers:
   `upload`.
 - **MUST** make each `fileId` match one non-empty file argument without `data`.
 - **MUST** list every non-empty file argument that has neither `data` nor `source` in the upload
-  request, each `fileId` once, and **MAY** also list one with a `source`, as [Server-Fetched
-  Inputs](#server-fetched-inputs) describes.
+  request, each `fileId` once, and **SHOULD** also list any file whose source it declined or failed
+  to fetch, as [Server-Fetched Inputs](#server-fetched-inputs) describes.
 - **MUST** record in `requestState` that an upload request was issued, and carry that record
   into every later `requestState` of the logical call.
 - **MUST NOT** return an upload request on a retry whose `requestState` holds that record.
@@ -726,7 +726,12 @@ identifier, with one entry per file. The server **MUST** also describe the resul
 
 ```typescript
 interface ResultFilesMeta {
-  downloads: DownloadTarget[];
+  downloads?: DownloadTarget[];
+  /**
+   * Per-file reasons when a server declines a source or fails to fetch or verify it. See Source
+   * Failures.
+   */
+  sourceErrors?: SourceError[];
 }
 
 interface DownloadTarget {
@@ -878,10 +883,11 @@ Servers:
   `digest` if the tool's schema requires it. They **SHOULD** verify a `digest` that is present,
   because the server reads every byte during the fetch. They **MUST NOT** run the tool on bytes
   they have not confirmed.
-- **MAY** list a file whose source they declined, or whose fetch failed, in an upload request, if
+- **SHOULD** list a file whose source they declined, or whose fetch failed, in an upload request, if
   the request declared `upload`, the server advertised it, and the logical call has had no upload
   request. The server then uses the uploaded bytes and ignores `source`. Otherwise it **MUST**
-  return `isError: true` without running the tool.
+  return `isError: true` without running the tool, and **SHOULD** report the reason in
+  `sourceErrors` as [Source Failures](#source-failures) describes.
 - **SHOULD**, in a call that needs an upload request for other files, attempt the fetch before
   returning the upload request, so that the request can list a file whose fetch failed, and
   **MUST** complete it by step 3 of [Retry](#retry).
@@ -892,7 +898,8 @@ Servers:
   requires.
 
 Fetched bytes that fail a check are handled as for any file. The server **MUST NOT** run the tool,
-and **SHOULD** release the staged bytes.
+**SHOULD** release the staged bytes, and **SHOULD** report `check_failed` in `sourceErrors` as
+[Source Failures](#source-failures) describes.
 
 A source is always copied from an `omit` `url` target, the only kind that [stdio](#stdio) allows. A
 server on stdio can advertise `fetch`, and a target that a server on stdio returned can be a source.
@@ -982,6 +989,60 @@ set or repeat an allowed name under different casing, and **MUST NOT** strip hea
 to make it fit; instead, the client downloads the file itself and uploads it if needed. Servers
 **MUST** decline, without connecting, any `source` whose `headers` include a name outside this set
 or repeat an allowed name under different casing.
+
+#### Source Failures
+
+When a server returns `isError: true` because it declined a source, failed to fetch it, or rejected
+the fetched bytes on a check, it **SHOULD** list each affected file in `sourceErrors` under the
+extension identifier in the result's `_meta`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "resultType": "complete",
+    "isError": true,
+    "content": [{ "type": "text", "text": "Could not fetch file-1 from source." }],
+    "_meta": {
+      "io.modelcontextprotocol/files": {
+        "sourceErrors": [
+          { "fileId": "file-1", "reason": "refused" }
+        ]
+      }
+    }
+  }
+}
+```
+
+```typescript
+interface SourceError {
+  /** The corresponding FileInput.id in the call arguments. */
+  fileId: string;
+  /** Why the server did not use the source. */
+  reason: "declined" | "refused" | "unreachable" | "check_failed";
+}
+```
+
+The `reason` values are:
+
+- `declined`: The server rejected the source before connecting, for example because it failed
+  [Targets](#targets), [Addresses](#addresses), [Allowed Fetch Domains](#allowed-fetch-domains),
+  [Allowed Source Headers](#allowed-source-headers), or another server policy.
+- `refused`: The server connected to the source and received a non-success HTTP response, including
+  `401`, `403`, `404`, `410`, `5xx`, or a `3xx` redirect.
+- `unreachable`: The server could not reach the source or finish the transfer because of a network,
+  DNS, TLS, timeout, or stream error.
+- `check_failed`: The server fetched bytes, but they failed a size, `digest`, or content-type
+  check.
+
+Servers **MUST** report `declined` (not `unreachable`) for a source rejected under
+[Addresses](#addresses) before connecting, and **MUST NOT** include source URLs, headers, or
+internal network details in `content` or `_meta`. A host can use `reason` to decide its next step,
+for example downloading and uploading the file itself on `declined`, `refused`, or `unreachable`,
+asking the producer for a fresh target on `refused`, or stopping on `check_failed`. Clients **MUST**
+handle `isError: true` responses without `sourceErrors` and **MUST** ignore unrecognized `reason`
+values.
 
 ### Targets
 
@@ -1116,16 +1177,16 @@ Servers **MUST** respond as shown. Conditions on `requestState`, the tool name, 
 principal apply to every retry from the one that answers an upload request onward. `-32021` is
 [`MissingRequiredClientCapabilityError`](https://modelcontextprotocol.io/specification/2026-07-28/schema#missingrequiredclientcapabilityerror).
 
-| Condition                                                                                                                                                                                                | Response                                                                 |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Non-empty file omits `data` and `source`, server has `upload`, request did not declare it                                                                                                                | `-32021` with `data.requiredCapabilities` listing the missing capability |
-| Server knows the tool can only return a download, request did not declare `download`                                                                                                                     | `-32021` as above, before running the tool                               |
-| Inline `data` is over the server's `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                |
-| `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                                     | JSON-RPC `-32602`                                                        |
-| Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                                | `isError: true`, without running the tool                                |
-| A server with `fetch` receives a non-empty file that has both `data` and `source`                                                                                                                        | `isError: true`, without running the tool                                |
-| Server declines a source or its fetch fails; the request declared `upload`, the server advertises it, and the logical call has had no upload request                                                     | An upload request that lists the file, or `isError: true`                |
-| Server declines a source or its fetch fails, in any other case                                                                                                                                           | `isError: true`, without running the tool                                |
+| Condition                                                                                                                                                                                                | Response                                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Non-empty file omits `data` and `source`, server has `upload`, request did not declare it                                                                                                                | `-32021` with `data.requiredCapabilities` listing the missing capability                               |
+| Server knows the tool can only return a download, request did not declare `download`                                                                                                                     | `-32021` as above, before running the tool                                                             |
+| Inline `data` is over the server's `maxInlineBytes` in total, not accepted, undecodable, or fails a size or digest check; an empty file fails a digest check; duplicate `id`; or no way to accept a file | `isError: true`, without running the tool                                                              |
+| `requestState` fails verification or was consumed; tool name, arguments, or principal differ from it                                                                                                     | JSON-RPC `-32602`                                                                                      |
+| Bytes have not arrived, cannot be confirmed or finalized, or fail a check                                                                                                                                | `isError: true`, without running the tool (**SHOULD** include `sourceErrors` for a sourced file)       |
+| A server with `fetch` receives a non-empty file that has both `data` and `source`                                                                                                                        | `isError: true`, without running the tool                                                              |
+| Server declines a source or its fetch fails; the request declared `upload`, the server advertises it, and the logical call has had no upload request                                                     | An upload request that lists the file (**SHOULD**), or `isError: true` (**SHOULD** add `sourceErrors`) |
+| Server declines a source or its fetch fails, in any other case                                                                                                                                           | `isError: true`, without running the tool (**SHOULD** include `sourceErrors`)                          |
 
 ## Backward Compatibility
 
@@ -1162,7 +1223,9 @@ Restricting `FileSource.headers` to a fixed set of safe `GET` headers prevents a
 injecting authentication, proxy-routing, or cloud-metadata headers into the server's outbound
 request. Advertising `allowedDomains` helps clients avoid failed calls, but servers **MUST** still
 enforce their own allowlist on every call and **SHOULD NOT** advertise overly broad wildcard
-domains.
+domains. When reporting [Source Failures](#source-failures), servers **MUST** report `declined` for
+targets rejected under [Addresses](#addresses) before connecting, so error reasons do not probe
+internal connectivity.
 
 A malicious producing server can serve the fetching server bytes that differ from what it would
 serve the client. `digest` detects this, which is a reason for producers to include one. Delegation
@@ -1223,7 +1286,9 @@ request, a download (including `maxInlineBytes: 0` returning a download target i
 blob), a server-fetched input with `digest` verified, a source with an unrecognized member (such as
 `credentials`) declined, a source on an address that [Addresses](#addresses) forbids declined, a
 source on a domain outside `allowedDomains` declined, a source with a header outside [Allowed Source
-Headers](#allowed-source-headers) declined, and a failed fetch answered with an upload request.
+Headers](#allowed-source-headers) declined, a failed fetch answered with an upload request when
+`upload` is declared, and a failed fetch or failed byte check answered with `isError: true` and
+`sourceErrors`.
 
 ## Open Questions
 
