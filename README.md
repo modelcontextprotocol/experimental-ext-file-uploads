@@ -1,7 +1,8 @@
 # experimental-ext-file-uploads
 
-Experimental MCP extension for moving files between a client and a tool out of band, so the bytes
-stay out of model context and out of JSON-RPC messages. Maintained by the
+Experimental MCP extension for moving files between a client and a tool out of band, and from one
+tool's output to another tool's input, so the bytes stay out of model context and out of JSON-RPC
+messages. Maintained by the
 [File Uploads Working Group](https://modelcontextprotocol.io/community/working-groups/file-uploads).
 
 > [!IMPORTANT]
